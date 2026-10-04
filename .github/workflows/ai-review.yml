@@ -22,5 +22,6 @@ jobs:
     with:
       test-command: 'python3 -m py_compile actions/ai-review/ai_review.py && bash -n scripts/onboard-repo.sh'
       auto-merge: false   # changes to the shared reviewer are merged by hand
-    secrets:
-      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+    # inherit: every Bedrock secret (role ARN or API key) reaches the shared
+    # workflow without this file naming them, so adding one needs no caller PR.
+    secrets: inherit

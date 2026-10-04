@@ -26,8 +26,12 @@ a diff over 150k chars all produce request-changes.
 
 Two modes; the reviewer fails closed if neither is configured.
 
-**OIDC role (preferred, no stored secret).** Repo variables `AWS_ROLE_ARN`,
-`AWS_REGION`, `REVIEW_MODEL`. In your AWS account, once:
+**OIDC role (preferred, no credential stored anywhere).** Repo **secret**
+`AWS_ROLE_ARN` plus repo variables `AWS_REGION` and `REVIEW_MODEL`. The ARN is
+not a credential -- only a GitHub-issued OIDC token from a repo the trust
+policy names can assume the role, and GitHub never issues one to fork PRs --
+but it is a secret so the account ID is masked in this public repo's run logs.
+In your AWS account, once:
 
 1. IAM -> Identity providers -> add OpenID Connect provider
    `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`.

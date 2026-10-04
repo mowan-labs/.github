@@ -12,8 +12,8 @@
 #   scripts/onboard-repo.sh mowan-graph 'pip install -e .[dev] && pytest -q'
 #
 # What it does:
-#   1. Sets REVIEW_MODEL / AWS_REGION / AWS_ROLE_ARN variables (or the
-#      Bedrock API key secret) on the repo.
+#   1. Sets REVIEW_MODEL / AWS_REGION variables and the AWS_ROLE_ARN secret
+#      (or the Bedrock API key secret) on the repo.
 #   2. Lets GitHub Actions approve PRs in that repo.
 #   3. Opens a PR adding .github/workflows/ai-review.yml -- that PR is itself
 #      the first thing the new reviewer reviews.
@@ -35,7 +35,8 @@ echo "==> secrets / variables on $REPO"
 gh variable set REVIEW_MODEL --repo "$REPO" --body "$REVIEW_MODEL"
 gh variable set AWS_REGION --repo "$REPO" --body "$AWS_REGION"
 if [ -n "${AWS_ROLE_ARN:-}" ]; then
-  gh variable set AWS_ROLE_ARN --repo "$REPO" --body "$AWS_ROLE_ARN"
+  # A secret, not a variable: masks the account ID in (public) run logs.
+  printf '%s' "$AWS_ROLE_ARN" | gh secret set AWS_ROLE_ARN --repo "$REPO"
 else
   # Piped via stdin so the key never appears in the process list.
   printf '%s' "$BEDROCK_KEY" | gh secret set AWS_BEARER_TOKEN_BEDROCK --repo "$REPO"

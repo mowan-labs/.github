@@ -21,5 +21,6 @@ jobs:
     uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@main
     with:
       test-command: __TEST_COMMAND__
-    secrets:
-      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+    # inherit: every Bedrock secret (role ARN or API key) reaches the shared
+    # workflow without this file naming them, so adding one needs no caller PR.
+    secrets: inherit
