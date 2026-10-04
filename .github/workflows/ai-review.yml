@@ -1,0 +1,83 @@
+# Reusable AI review + gated self-merge for mowan-labs repos.
+#
+# Callers keep only templates/caller-ai-review.yml. Everything else lives here,
+# so a prompt / model / merge-rule change lands once for every repo.
+#
+# Merge rule: the PR merges only when BOTH the repo's tests AND the AI review
+# pass, and only at the exact head commit that was reviewed.
+name: ai-review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      test-command:
+        description: Shell command that runs the repo's tests. Required on purpose; pass `true` to opt out explicitly.
+        required: true
+        type: string
+      auto-merge:
+        description: Merge the PR when tests and review both pass.
+        required: false
+        type: boolean
+        default: true
+      merge-method:
+        description: squash | merge | rebase
+        required: false
+        type: string
+        default: squash
+      review-model:
+        description: Model ID for the reviewer. Falls back to the repo variable REVIEW_MODEL.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: ${{ inputs.test-command }}
+
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mowan-labs/.github/actions/ai-review@main
+        with:
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: ${{ inputs.review-model || vars.REVIEW_MODEL }}
+          pr-number: ${{ github.event.pull_request.number }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          github-token: ${{ github.token }}
+
+  merge:
+    needs: [tests, review]
+    if: ${{ inputs.auto-merge && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge the reviewed commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          METHOD: ${{ inputs.merge-method }}
+        run: |
+          case "$METHOD" in squash|merge|rebase) ;; *) echo "bad merge-method: $METHOD"; exit 1;; esac
+          # --match-head-commit refuses if a newer, unreviewed commit was pushed meanwhile.
+          gh pr merge "$PR" --repo "$REPO" "--$METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
