@@ -1,13 +1,14 @@
-"""LLM PR reviewer. Stdlib only. Fails closed: any error yields REQUEST_CHANGES.
+"""LLM PR reviewer on Amazon Bedrock. Fails closed: any error yields REQUEST_CHANGES.
 
 Usage: ai_review.py <diff.patch> <verdict.json>
-Env:   ANTHROPIC_API_KEY, REVIEW_MODEL
+Env:   REVIEW_MODEL (Bedrock model or inference-profile ID), AWS_REGION, and
+       credentials: either OIDC role creds (AWS_ACCESS_KEY_ID/...) or
+       AWS_BEARER_TOKEN_BEDROCK (Bedrock API key). boto3 resolves both.
 Output JSON: {"verdict": "APPROVE" | "REQUEST_CHANGES", "body": "<markdown>"}
 """
 import json
 import os
 import sys
-import urllib.request
 
 MAX_DIFF_CHARS = 150_000   # bigger diffs go to a human
 MAX_BODY_CHARS = 60_000    # GitHub review body limit is 65,536
@@ -39,22 +40,26 @@ def write(path, verdict, body):
 
 
 def call_model(diff):
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=json.dumps({
-            "model": os.environ["REVIEW_MODEL"],
+    import boto3  # imported here so a missing install fails closed, not at import
+    from botocore.config import Config
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=os.environ["AWS_REGION"],
+        config=Config(read_timeout=300, retries={"max_attempts": 3, "mode": "standard"}),
+    )
+    resp = client.invoke_model(
+        modelId=os.environ["REVIEW_MODEL"],
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 4000,
             "system": SYSTEM,
             "messages": [{"role": "user", "content": "<diff>\n" + diff + "\n</diff>"}],
-        }).encode(),
-        headers={
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        }),
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        payload = json.load(resp)
+    payload = json.loads(resp["body"].read())
     text = "".join(b.get("text", "") for b in payload["content"] if b.get("type") == "text")
     return json.loads(text[text.index("{"): text.rindex("}") + 1])
 
@@ -78,6 +83,9 @@ def main(diff_path, out_path):
     if not os.environ.get("REVIEW_MODEL"):
         return write(out_path, "REQUEST_CHANGES",
                      "Reviewer not configured: set the REVIEW_MODEL repo variable or the review-model input.")
+    if not os.environ.get("AWS_REGION"):
+        return write(out_path, "REQUEST_CHANGES",
+                     "Reviewer not configured: set the AWS_REGION repo variable.")
     with open(diff_path, errors="replace") as fh:
         diff = fh.read()
     if not diff.strip():

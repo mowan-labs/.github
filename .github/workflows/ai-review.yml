@@ -1,5 +1,5 @@
-# Copied into each repo as .github/workflows/ai-review.yml by scripts/onboard-repo.sh.
-# All logic lives in mowan-labs/.github; edit there, not here.
+# This repo's OWN caller: the shared reviewer reviews changes to itself.
+# The reusable workflow is reusable-ai-review.yml; never overwrite it with a caller.
 name: ai-review
 
 on:
@@ -14,12 +14,13 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write   # lets the shared workflow assume the AWS role via OIDC
 
 jobs:
   ai-review:
-    uses: mowan-labs/.github/.github/workflows/ai-review.yml@main
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@main
     with:
       test-command: 'python3 -m py_compile actions/ai-review/ai_review.py && bash -n scripts/onboard-repo.sh'
-      auto-merge: false
+      auto-merge: false   # changes to the shared reviewer are merged by hand
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
