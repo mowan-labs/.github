@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   ai-review:
-    uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@main
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@mainline
     with:
       test-command: 'python3 -m py_compile actions/ai-review/ai_review.py && bash -n scripts/onboard-repo.sh'
       auto-merge: false   # changes to the shared reviewer are merged by hand
