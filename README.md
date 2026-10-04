@@ -40,7 +40,8 @@ Two modes; the reviewer fails closed if neither is configured.
   "Action": "sts:AssumeRoleWithWebIdentity",
   "Condition": {
     "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
-    "StringLike":   {"token.actions.githubusercontent.com:sub": "repo:mowan-labs/*:pull_request"}}}]}
+    "StringLike":   {"token.actions.githubusercontent.com:sub": [
+      "repo:mowan-labs/*:pull_request", "repo:xysr89/*:pull_request"]}}}]}
 ```
 
 3. Grant it only `bedrock:InvokeModel`:

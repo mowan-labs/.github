@@ -20,9 +20,10 @@
 set -euo pipefail
 
 ORG=mowan-labs
-REPO_NAME=${1:?usage: onboard-repo.sh <repo-name> '<test command>'}
-TEST_CMD=${2:?usage: onboard-repo.sh <repo-name> '<test command>'}
-REPO="$ORG/$REPO_NAME"
+REPO_NAME=${1:?usage: onboard-repo.sh <repo-name|owner/repo> '<test command>'}
+TEST_CMD=${2:?usage: onboard-repo.sh <repo-name|owner/repo> '<test command>'}
+# A bare name means mowan-labs; owner/repo works for any owner (.github is public).
+case "$REPO_NAME" in */*) REPO="$REPO_NAME" ;; *) REPO="$ORG/$REPO_NAME" ;; esac
 : "${REVIEW_MODEL:?set REVIEW_MODEL}"
 : "${AWS_REGION:?set AWS_REGION}"
 if [ -z "${AWS_ROLE_ARN:-}" ] && [ -z "${BEDROCK_KEY:-}" ]; then
