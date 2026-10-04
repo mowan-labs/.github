@@ -28,6 +28,14 @@ ANTHROPIC_API_KEY=... REVIEW_MODEL=<model-id> \
   scripts/onboard-repo.sh <repo-name> '<test command>'
 ```
 
+## Safety valves
+
+- **PRs that touch `.github/` never auto-merge.** A `pull_request` run uses the
+  PR's own caller workflow, so such a PR could have weakened its own gate. The
+  merge job comments and stops; a human merges.
+- **Kill switch:** set the variable `AI_AUTOMERGE=false` on a repo (or the org)
+  to stop all auto-merges at once. Reviews keep running.
+
 ## Known limits
 
 - **Free plan:** no branch protection on private repos, so nothing stops a
