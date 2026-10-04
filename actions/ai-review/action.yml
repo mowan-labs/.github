@@ -1,17 +1,14 @@
 name: mowan AI review
-description: Send the PR diff to a Bedrock-hosted LLM reviewer, post the verdict as a PR review, and fail unless it approves.
+description: Review the PR diff with Kiro CLI in headless mode, post the verdict as a PR review, and fail unless it approves.
 
-# Credentials: run aws-actions/configure-aws-credentials before this action
-# (OIDC role), OR pass bedrock-api-key. With neither, the reviewer fails closed.
+# Credential: a Kiro API key (KIRO_API_KEY). Without it the reviewer fails closed.
 inputs:
   model:
-    description: Bedrock model or inference-profile ID.
-    required: true
-  aws-region:
-    description: Region for bedrock-runtime.
-    required: true
-  bedrock-api-key:
-    description: Optional Bedrock API key. Leave empty when using an OIDC role.
+    description: Optional Kiro model ID. Empty uses Kiro's default model.
+    required: false
+    default: ""
+  kiro-api-key:
+    description: Kiro headless API key.
     required: false
     default: ""
   pr-number:
@@ -33,24 +30,19 @@ runs:
         HEAD_SHA: ${{ inputs.head-sha }}
       run: git diff "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/diff.patch"
 
-    - name: Install boto3
+    - name: Install Kiro CLI
       shell: bash
-      # Exact pin: bumps are a reviewed change here, never a silent upgrade.
-      # venv avoids PEP 668 refusals on the runner's system Python.
       run: |
-        python3 -m venv "$RUNNER_TEMP/venv"
-        "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.108
+        curl -fsSL https://cli.kiro.dev/install | bash
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Ask the reviewer
       shell: bash
       env:
+        KIRO_API_KEY: ${{ inputs.kiro-api-key }}
         REVIEW_MODEL: ${{ inputs.model }}
-        AWS_REGION: ${{ inputs.aws-region }}
-        AWS_BEARER_TOKEN_BEDROCK: ${{ inputs.bedrock-api-key }}
-      run: |
-        # An empty bearer variable would shadow OIDC role creds in boto3.
-        [ -n "$AWS_BEARER_TOKEN_BEDROCK" ] || unset AWS_BEARER_TOKEN_BEDROCK
-        "$RUNNER_TEMP/venv/bin/python" "$GITHUB_ACTION_PATH/ai_review.py" "$RUNNER_TEMP/diff.patch" "$RUNNER_TEMP/verdict.json"
+        NO_COLOR: "1"
+      run: python3 "$GITHUB_ACTION_PATH/ai_review.py" "$RUNNER_TEMP/diff.patch" "$RUNNER_TEMP/verdict.json"
 
     - name: Post review and set the gate
       shell: bash

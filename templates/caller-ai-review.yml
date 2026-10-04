@@ -14,13 +14,12 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
-  id-token: write   # lets the shared workflow assume the AWS role via OIDC
 
 jobs:
   ai-review:
     uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@mainline
     with:
       test-command: __TEST_COMMAND__
-    # inherit: every Bedrock secret (role ARN or API key) reaches the shared
+    # inherit: the KIRO_API_KEY secret (and any future one) reaches the shared
     # workflow without this file naming them, so adding one needs no caller PR.
     secrets: inherit

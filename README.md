@@ -7,7 +7,8 @@ itself when both the repo's tests and the review pass.
 |---|---|
 | `.github/workflows/reusable-ai-review.yml` | Reusable workflow: tests, review, gated merge |
 | `.github/workflows/ai-review.yml` | This repo's own caller (review only, manual merge) |
-| `actions/ai-review/` | Composite action + Python reviewer on Bedrock (boto3, pinned) |
+| `actions/ai-review/` | Composite action + Python wrapper around Kiro CLI headless mode |
+| `tests/` | Unit tests for the wrapper (`python3 -m unittest discover -s tests`) |
 | `templates/caller-ai-review.yml` | The ~20-line file each repo carries |
 | `scripts/onboard-repo.sh` | Adds a repo: secret, variable, permission, caller PR |
 
@@ -19,57 +20,30 @@ itself when both the repo's tests and the review pass.
 3. `merge` runs only if both jobs pass, and only at the reviewed head commit
    (`--match-head-commit`), so a later unreviewed push cannot ride along.
 
-The reviewer fails closed: an API error, a malformed reply, a missing model or
+The reviewer fails closed: a missing key, a Kiro CLI error, a malformed reply or
 a diff over 150k chars all produce request-changes.
 
-## Bedrock credentials
+## Reviewer: Kiro CLI headless mode
 
-Two modes; the reviewer fails closed if neither is configured.
+The review step installs [Kiro CLI](https://kiro.dev/docs/cli/headless/) and
+runs `kiro-cli chat --no-interactive` with the diff on stdin. It grants **no
+tools**, so a prompt injected through the diff cannot read files or the
+environment.
 
-**OIDC role (preferred, no credential stored anywhere).** Repo **secret**
-`AWS_ROLE_ARN` plus repo variables `AWS_REGION` and `REVIEW_MODEL`. The ARN is
-not a credential -- only a GitHub-issued OIDC token from a repo the trust
-policy names can assume the role, and GitHub never issues one to fork PRs --
-but it is a secret so the account ID is masked in this public repo's run logs.
-In your AWS account, once:
+| Setting | Type | Required |
+|---|---|---|
+| `KIRO_API_KEY` | Repo secret (`ksk_...`, from [app.kiro.dev](https://app.kiro.dev)) | Yes |
+| `REVIEW_MODEL` | Repo variable, a Kiro model ID | No -- Kiro's default model when unset |
 
-1. IAM -> Identity providers -> add OpenID Connect provider
-   `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`.
-2. Create a role with this trust policy:
-
-```json
-{"Version": "2012-10-17", "Statement": [{
-  "Effect": "Allow",
-  "Principal": {"Federated": "arn:aws:iam::<ACCOUNT>:oidc-provider/token.actions.githubusercontent.com"},
-  "Action": "sts:AssumeRoleWithWebIdentity",
-  "Condition": {
-    "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
-    "StringLike":   {"token.actions.githubusercontent.com:sub": [
-      "repo:mowan-labs/*:pull_request", "repo:xysr89/*:pull_request"]}}}]}
-```
-
-3. Grant it only `bedrock:InvokeModel`:
-
-```json
-{"Version": "2012-10-17", "Statement": [{
-  "Effect": "Allow", "Action": "bedrock:InvokeModel",
-  "Resource": [
-    "arn:aws:bedrock:*::foundation-model/anthropic.*",
-    "arn:aws:bedrock:*:<ACCOUNT>:inference-profile/*"]}]}
-```
-
-4. Enable the model in the Bedrock console (Model access) for that region.
-
-**Bedrock API key.** Repo secret `AWS_BEARER_TOKEN_BEDROCK` plus variables
-`AWS_REGION` and `REVIEW_MODEL`. Simpler, but long-lived: set an expiry and
-rotate it.
+Headless API keys need a Kiro Pro, Pro+, Pro Max or Power subscription. The key
+is long-lived and tied to your Kiro account and its usage: keep it in repo
+secrets only, rotate it, and revoke it from the Kiro portal if it leaks.
+GitHub never passes secrets to fork PRs, so outside contributors cannot use it.
 
 ## Onboard a repo
 
 ```bash
-AWS_ROLE_ARN=arn:aws:iam::<ACCOUNT>:role/<role> AWS_REGION=us-east-1 \
-REVIEW_MODEL=<bedrock-model-or-profile-id> \
-  scripts/onboard-repo.sh <repo-name> '<test command>'
+KIRO_API_KEY=ksk_... scripts/onboard-repo.sh <repo-name|owner/repo> '<test command>'
 ```
 
 ## Safety valves
