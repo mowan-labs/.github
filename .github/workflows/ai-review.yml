@@ -64,7 +64,9 @@ jobs:
 
   merge:
     needs: [tests, review]
-    if: ${{ inputs.auto-merge && !github.event.pull_request.draft }}
+    # Kill switch: set repo or org variable AI_AUTOMERGE=false to stop merging
+    # everywhere without a PR. Review still runs and still posts its verdict.
+    if: ${{ inputs.auto-merge && !github.event.pull_request.draft && vars.AI_AUTOMERGE != 'false' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -79,5 +81,13 @@ jobs:
           METHOD: ${{ inputs.merge-method }}
         run: |
           case "$METHOD" in squash|merge|rebase) ;; *) echo "bad merge-method: $METHOD"; exit 1;; esac
+          # A pull_request run executes the PR's OWN copy of the caller workflow,
+          # so a PR touching .github/ could have weakened the gate that is now
+          # about to merge it. Those always need a human merge.
+          if gh pr diff "$PR" --repo "$REPO" --name-only | grep -q '^\.github/'; then
+            echo "::warning::PR changes .github/ -- auto-merge skipped, merge by hand after reading the diff."
+            gh pr comment "$PR" --repo "$REPO" --body "Auto-merge skipped: this PR changes \`.github/\`, which controls the review gate itself. A human must merge it."
+            exit 0
+          fi
           # --match-head-commit refuses if a newer, unreviewed commit was pushed meanwhile.
           gh pr merge "$PR" --repo "$REPO" "--$METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
