@@ -20,6 +20,7 @@ jobs:
     uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@mainline
     with:
       test-command: __TEST_COMMAND__
-    # inherit: the KIRO_API_KEY secret (and any future one) reaches the shared
-    # workflow without this file naming them, so adding one needs no caller PR.
-    secrets: inherit
+    # Explicit, not `inherit`: inherit only crosses into a reusable workflow
+    # owned by the SAME org, and personal-account repos call mowan-labs.
+    secrets:
+      KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
