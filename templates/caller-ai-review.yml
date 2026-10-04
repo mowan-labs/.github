@@ -14,11 +14,12 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write   # lets the shared workflow assume the AWS role via OIDC
 
 jobs:
   ai-review:
-    uses: mowan-labs/.github/.github/workflows/ai-review.yml@main
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-review.yml@main
     with:
       test-command: __TEST_COMMAND__
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
