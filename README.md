@@ -85,7 +85,7 @@ REVIEW_MODEL=<bedrock-model-or-profile-id> \
 - **Free plan:** no branch protection on private repos, so nothing stops a
   manual merge of a red PR. The gate is the workflow's own merge job.
 - **Merges use `GITHUB_TOKEN`**, which does not trigger other workflows (for
-  example a deploy on push to `main`). Switch the merge job to a GitHub App
+  example a deploy on push to `mainline`). Switch the merge job to a GitHub App
   token when that matters.
-- **Callers track `@main`.** Tag a release (`v1`) and pin callers to it once
+- **Callers track `@mainline`.** Tag a release (`v1`) and pin callers to it once
   the workflow stabilises.

@@ -74,7 +74,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: ai-review-${{ github.event.pull_request.number }}
           mask-aws-account-id: true
-      - uses: mowan-labs/.github/actions/ai-review@main
+      - uses: mowan-labs/.github/actions/ai-review@mainline
         with:
           model: ${{ inputs.review-model || vars.REVIEW_MODEL }}
           aws-region: ${{ vars.AWS_REGION }}
