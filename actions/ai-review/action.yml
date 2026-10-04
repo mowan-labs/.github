@@ -1,0 +1,52 @@
+name: mowan AI review
+description: Send the PR diff to an LLM reviewer, post the verdict as a PR review, and fail unless it approves.
+
+inputs:
+  api-key:
+    description: Anthropic API key.
+    required: true
+  model:
+    description: Model ID.
+    required: true
+  pr-number:
+    required: true
+  base-sha:
+    required: true
+  head-sha:
+    required: true
+  github-token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build diff
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: git diff "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/diff.patch"
+
+    - name: Ask the reviewer
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.api-key }}
+        REVIEW_MODEL: ${{ inputs.model }}
+      run: python3 "$GITHUB_ACTION_PATH/ai_review.py" "$RUNNER_TEMP/diff.patch" "$RUNNER_TEMP/verdict.json"
+
+    - name: Post review and set the gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ inputs.pr-number }}
+        REPO: ${{ github.repository }}
+      run: |
+        verdict=$(jq -r .verdict "$RUNNER_TEMP/verdict.json")
+        jq -r .body "$RUNNER_TEMP/verdict.json" > "$RUNNER_TEMP/body.md"
+        if [ "$verdict" = "APPROVE" ]; then
+          gh pr review "$PR" --repo "$REPO" --approve --body-file "$RUNNER_TEMP/body.md"
+        else
+          gh pr review "$PR" --repo "$REPO" --request-changes --body-file "$RUNNER_TEMP/body.md"
+          echo "::error::AI review did not approve"
+          exit 1
+        fi

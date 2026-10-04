@@ -1,0 +1,24 @@
+# Copied into each repo as .github/workflows/ai-review.yml by scripts/onboard-repo.sh.
+# All logic lives in mowan-labs/.github; edit there, not here.
+name: ai-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# A called workflow can never exceed the caller's permissions.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai-review:
+    uses: mowan-labs/.github/.github/workflows/ai-review.yml@main
+    with:
+      test-command: __TEST_COMMAND__
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
