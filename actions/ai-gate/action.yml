@@ -71,10 +71,16 @@ runs:
         tests_state=$(latest_state mowan/tests)
         review_desc=$(jq -r '[.[] | select(.context=="mowan/ai-review")][0].description // ""' "$statuses_json")
 
-        # counts come from the review status description "high=<n> medium=<n> low=<n>".
-        high=$(printf '%s' "$review_desc" | sed -n 's/.*high=\([0-9]*\).*/\1/p'); high=${high:-0}
-        medium=$(printf '%s' "$review_desc" | sed -n 's/.*medium=\([0-9]*\).*/\1/p'); medium=${medium:-0}
-        low=$(printf '%s' "$review_desc" | sed -n 's/.*low=\([0-9]*\).*/\1/p'); low=${low:-0}
+        # Counts come from the mowan/ai-review status description. Parse them in
+        # gate.py (counts_from_status): a missing/empty/unparseable description
+        # fails closed to {high:1,medium:0,low:0} with reason "AI review not
+        # recorded for head SHA", so a reviewer that crashed before posting a
+        # status cannot let a PR merge unreviewed.
+        counts_json=$(python3 "$GITHUB_ACTION_PATH/gate.py" counts "$review_desc")
+        high=$(printf '%s' "$counts_json" | jq -r '.counts.high')
+        medium=$(printf '%s' "$counts_json" | jq -r '.counts.medium')
+        low=$(printf '%s' "$counts_json" | jq -r '.counts.low')
+        review_reason=$(printf '%s' "$counts_json" | jq -r '.reason // ""')
 
         # tests_ok: success->true, failure->false, anything else (incl. missing)->null
         case "$tests_state" in
@@ -157,6 +163,7 @@ runs:
           --argjson automerge "$AUTOMERGE_ENABLED" \
           --argjson touches "$touches_github" \
           --argjson approvers "$approvers_arr" \
+          --arg review_reason "$review_reason" \
           '{tier:$tier, tests_ok:$tests_ok,
             counts:{high:$high,medium:$medium,low:$low},
             human_approved:$human_approved,
@@ -164,7 +171,8 @@ runs:
             unresolved_human_threads:$unresolved,
             fix_rounds:$fix_rounds, fix_round_cap:$cap,
             automerge_enabled:$automerge, touches_github:$touches,
-            approvers:$approvers}' > "$facts"
+            approvers:$approvers,
+            review_reason:(if $review_reason=="" then null else $review_reason end)}' > "$facts"
         python3 "$GITHUB_ACTION_PATH/gate.py" "$facts" > "$RUNNER_TEMP/decision.json"
         cat "$RUNNER_TEMP/decision.json"
         decision=$(jq -r .decision "$RUNNER_TEMP/decision.json")

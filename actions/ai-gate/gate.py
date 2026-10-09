@@ -18,12 +18,45 @@ Decision order (first that applies wins):
   8. else merge.
 """
 import json
+import re
 import sys
+
+# Reason recorded when the AI review status is missing/empty/unparseable. The
+# gate must fail closed in that case (a reviewer that crashed before posting a
+# status must not let a low-tier PR merge unreviewed), so counts are forced to
+# one high finding. spec.md section 3 (reviewer errors are {high:1}).
+REVIEW_NOT_RECORDED = "AI review not recorded for head SHA"
+_FAIL_CLOSED_COUNTS = {"high": 1, "medium": 0, "low": 0}
+_COUNTS_RE = re.compile(r"high=(\d+)\s+medium=(\d+)\s+low=(\d+)")
+
+
+def counts_from_status(description):
+    """Parse `high=<n> medium=<n> low=<n>` from the mowan/ai-review status
+    description. Pure function, no I/O.
+
+    Returns a dict ``{"counts": {...}, "reason": <str or None>}``. When the
+    description is missing, empty, or does not contain a well-formed counts
+    triple, fail closed: counts ``{"high": 1, "medium": 0, "low": 0}`` and
+    reason ``"AI review not recorded for head SHA"``. On a valid description,
+    reason is ``None``.
+    """
+    if not description:
+        return {"counts": dict(_FAIL_CLOSED_COUNTS), "reason": REVIEW_NOT_RECORDED}
+    m = _COUNTS_RE.search(description)
+    if not m:
+        return {"counts": dict(_FAIL_CLOSED_COUNTS), "reason": REVIEW_NOT_RECORDED}
+    return {
+        "counts": {"high": int(m.group(1)),
+                   "medium": int(m.group(2)),
+                   "low": int(m.group(3))},
+        "reason": None,
+    }
 
 
 def decide(tier, tests_ok, counts, human_approved, human_changes_requested,
            unresolved_human_threads, fix_rounds, fix_round_cap,
-           automerge_enabled, touches_github, approvers=None):
+           automerge_enabled, touches_github, approvers=None,
+           review_reason=None):
     high = int(counts.get("high", 0))
     medium = int(counts.get("medium", 0))
     approvers = approvers or []
@@ -31,6 +64,12 @@ def decide(tier, tests_ok, counts, human_approved, human_changes_requested,
     # 1. Effective tier.
     effective_tier = "medium" if (tier == "low" and high > 0) else tier
     reasons = []
+    # Surface a review-provenance reason (e.g. "AI review not recorded for head
+    # SHA") on every decision path so it reaches the gate's reasons/sticky
+    # comment. The fail-closed counts that accompany it already drive the
+    # decision; this just explains why.
+    if review_reason:
+        reasons.append(review_reason)
     if effective_tier != tier:
         reasons.append("escalated low->medium: review found %d high finding(s)" % high)
 
@@ -99,6 +138,16 @@ def _to_tests_ok(v):
 
 
 def main(argv):
+    # `counts` subcommand: parse a mowan/ai-review status description (stdin or
+    # argv[2]) into fail-closed counts + reason. Used by the action.
+    if len(argv) > 1 and argv[1] == "counts":
+        if len(argv) > 2:
+            desc = argv[2]
+        else:
+            desc = sys.stdin.read()
+        print(json.dumps(counts_from_status(desc)))
+        return 0
+
     # Reads a JSON facts object from stdin or argv[1] (a file path), prints
     # {"decision","effective_tier","reasons"}.
     if len(argv) > 1:
@@ -107,10 +156,21 @@ def main(argv):
     else:
         facts = json.load(sys.stdin)
 
+    # Counts come from the recorded review status. If the facts carry the raw
+    # status description, derive counts (fail closed when missing/unparseable);
+    # otherwise honour an explicit counts object for backward compatibility.
+    review_reason = facts.get("review_reason")
+    if "review_description" in facts:
+        parsed = counts_from_status(facts.get("review_description"))
+        counts = parsed["counts"]
+        review_reason = parsed["reason"]
+    else:
+        counts = facts.get("counts") or {}
+
     result = decide(
         tier=facts["tier"],
         tests_ok=_to_tests_ok(facts.get("tests_ok")),
-        counts=facts.get("counts") or {},
+        counts=counts,
         human_approved=bool(facts.get("human_approved")),
         human_changes_requested=bool(facts.get("human_changes_requested")),
         unresolved_human_threads=int(facts.get("unresolved_human_threads") or 0),
@@ -119,6 +179,7 @@ def main(argv):
         automerge_enabled=bool(facts.get("automerge_enabled")),
         touches_github=bool(facts.get("touches_github")),
         approvers=facts.get("approvers") or [],
+        review_reason=review_reason,
     )
     print(json.dumps(result))
     return 0

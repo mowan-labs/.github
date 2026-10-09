@@ -112,5 +112,50 @@ class CLIHelpers(unittest.TestCase):
         self.assertFalse(gate._to_tests_ok(False))
 
 
+class CountsFromStatus(unittest.TestCase):
+    FAIL = {"high": 1, "medium": 0, "low": 0}
+
+    def test_missing_fails_closed(self):
+        r = gate.counts_from_status(None)
+        self.assertEqual(r["counts"], self.FAIL)
+        self.assertEqual(r["reason"], gate.REVIEW_NOT_RECORDED)
+
+    def test_empty_fails_closed(self):
+        r = gate.counts_from_status("")
+        self.assertEqual(r["counts"], self.FAIL)
+        self.assertEqual(r["reason"], gate.REVIEW_NOT_RECORDED)
+
+    def test_garbage_fails_closed(self):
+        for bad in ("totally unparseable", "high= medium= low=",
+                    "high=1 medium=2", "reviewer crashed"):
+            r = gate.counts_from_status(bad)
+            self.assertEqual(r["counts"], self.FAIL, bad)
+            self.assertEqual(r["reason"], gate.REVIEW_NOT_RECORDED, bad)
+
+    def test_valid_parses_and_no_reason(self):
+        r = gate.counts_from_status("high=2 medium=3 low=5")
+        self.assertEqual(r["counts"], {"high": 2, "medium": 3, "low": 5})
+        self.assertIsNone(r["reason"])
+
+    def test_valid_clean(self):
+        r = gate.counts_from_status("high=0 medium=0 low=0")
+        self.assertEqual(r["counts"], {"high": 0, "medium": 0, "low": 0})
+        self.assertIsNone(r["reason"])
+
+    def test_valid_embedded_in_marker(self):
+        r = gate.counts_from_status("review done high=1 medium=0 low=4 ok")
+        self.assertEqual(r["counts"], {"high": 1, "medium": 0, "low": 4})
+        self.assertIsNone(r["reason"])
+
+    def test_missing_review_fails_closed_through_decide(self):
+        # A low-tier PR with no recorded review must NOT merge: fail-closed
+        # counts escalate it and the reason reaches the gate reasons.
+        parsed = gate.counts_from_status(None)
+        r = gate.decide("low", True, parsed["counts"], False, False, 0, 0, 3,
+                        True, False, review_reason=parsed["reason"])
+        self.assertEqual(r["decision"], "block")
+        self.assertIn(gate.REVIEW_NOT_RECORDED, r["reasons"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,11 +47,13 @@ jobs:
 
   fix-from-review:
     # Only for ai/* PRs when a review is submitted (changes requested or a
-    # comment). The reusable workflow authoritatively enforces that the feedback
-    # it acts on was written by an allowed actor; this is just a cheap prefilter.
+    # comment) by a reviewer in the allowed-actors list. The reusable workflow
+    # authoritatively enforces that the feedback it acts on was written by an
+    # allowed actor; this reviewer prefilter (spec.md section 7) is cheap.
     if: >-
       github.event_name == 'pull_request_review' &&
       startsWith(github.event.pull_request.head.ref, 'ai/') &&
+      contains(format(',{0},', '__ALLOWED_ACTORS__'), format(',{0},', github.event.review.user.login)) &&
       (github.event.review.state == 'changes_requested' || github.event.review.state == 'commented')
     uses: mowan-labs/.github/.github/workflows/reusable-ai-coder.yml@mainline
     with:
