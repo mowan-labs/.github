@@ -1,0 +1,240 @@
+name: mowan AI gate decide
+description: >-
+  Gather the facts the gate needs from the GitHub API (statuses, reviews,
+  review threads, fix-round trailers, changed paths), run gate.py, write the
+  mowan/gate status, keep one sticky PR comment, set the risk:<tier> label, and
+  act on the decision (merge / dispatch coder / mention approvers). spec.md 4-5.
+
+inputs:
+  pr-number:
+    required: true
+  head-sha:
+    required: true
+  base-sha:
+    required: true
+  tier:
+    required: true
+  human-approvers:
+    description: Comma-separated logins allowed to give the approving review.
+    required: true
+  allowed-actors:
+    description: Comma-separated logins whose review threads/feedback are trusted.
+    required: true
+  fix-round-cap:
+    required: false
+    default: "3"
+  automerge-enabled:
+    description: "'true' unless vars.AI_AUTOMERGE == 'false'."
+    required: true
+  merge-method:
+    required: false
+    default: squash
+  coder-workflow:
+    description: Caller coder workflow filename; empty disables auto-fix dispatch.
+    required: false
+    default: ""
+  default-branch:
+    required: true
+  head-ref:
+    required: true
+  github-token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Decide and act
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr-number }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        TIER: ${{ inputs.tier }}
+        HUMAN_APPROVERS: ${{ inputs.human-approvers }}
+        ALLOWED_ACTORS: ${{ inputs.allowed-actors }}
+        FIX_ROUND_CAP: ${{ inputs.fix-round-cap }}
+        AUTOMERGE_ENABLED: ${{ inputs.automerge-enabled }}
+        MERGE_METHOD: ${{ inputs.merge-method }}
+        CODER_WORKFLOW: ${{ inputs.coder-workflow }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        HEAD_REF: ${{ inputs.head-ref }}
+      run: |
+        set -euo pipefail
+        case "$MERGE_METHOD" in squash|merge|rebase) ;; *) echo "bad merge-method: $MERGE_METHOD"; exit 1;; esac
+
+        # ---- statuses (state of record, keyed by head SHA) ----
+        statuses_json="$RUNNER_TEMP/statuses.json"
+        gh api "repos/$REPO/commits/$HEAD_SHA/statuses" --paginate > "$statuses_json"
+        latest_state() { jq -r --arg c "$1" '[.[] | select(.context==$c)][0].state // ""' "$statuses_json"; }
+        tests_state=$(latest_state mowan/tests)
+        review_desc=$(jq -r '[.[] | select(.context=="mowan/ai-review")][0].description // ""' "$statuses_json")
+
+        # counts come from the review status description "high=<n> medium=<n> low=<n>".
+        high=$(printf '%s' "$review_desc" | sed -n 's/.*high=\([0-9]*\).*/\1/p'); high=${high:-0}
+        medium=$(printf '%s' "$review_desc" | sed -n 's/.*medium=\([0-9]*\).*/\1/p'); medium=${medium:-0}
+        low=$(printf '%s' "$review_desc" | sed -n 's/.*low=\([0-9]*\).*/\1/p'); low=${low:-0}
+
+        # tests_ok: success->true, failure->false, anything else (incl. missing)->null
+        case "$tests_state" in
+          success) tests_ok=true ;;
+          failure) tests_ok=false ;;
+          *)       tests_ok=null ;;
+        esac
+
+        # ---- reviews: human_approved / human_changes_requested ----
+        reviews_json="$RUNNER_TEMP/reviews.json"
+        gh api "repos/$REPO/pulls/$PR/reviews" --paginate > "$reviews_json"
+        # LATEST review per approver login that is APPROVED and at head_sha.
+        human_approved=$(jq -r --arg sha "$HEAD_SHA" --arg who "$HUMAN_APPROVERS" '
+          ($who | split(",") | map(gsub("^\\s+|\\s+$";""))) as $apr
+          | [ .[] | select(.user.login as $l | $apr | index($l))
+                  | select(.state=="APPROVED" or .state=="CHANGES_REQUESTED") ]
+          | group_by(.user.login)
+          | map(sort_by(.submitted_at) | last)
+          | any(.state=="APPROVED" and .commit_id==$sha)
+        ' "$reviews_json")
+        human_changes_requested=$(jq -r --arg who "$HUMAN_APPROVERS" '
+          ($who | split(",") | map(gsub("^\\s+|\\s+$";""))) as $apr
+          | [ .[] | select(.user.login as $l | $apr | index($l))
+                  | select(.state=="APPROVED" or .state=="CHANGES_REQUESTED") ]
+          | group_by(.user.login)
+          | map(sort_by(.submitted_at) | last)
+          | any(.state=="CHANGES_REQUESTED")
+        ' "$reviews_json")
+
+        # ---- unresolved human review threads (GraphQL) ----
+        owner=${REPO%/*}; name=${REPO#*/}
+        threads_json="$RUNNER_TEMP/threads.json"
+        gh api graphql -f owner="$owner" -f name="$name" -F pr="$PR" -f query='
+          query($owner:String!,$name:String!,$pr:Int!){
+            repository(owner:$owner,name:$name){
+              pullRequest(number:$pr){
+                reviewThreads(first:100){
+                  nodes{ isResolved comments(first:1){ nodes{ author{ login } } } }
+                }}}}' > "$threads_json"
+        unresolved=$(jq -r --arg who "$ALLOWED_ACTORS" '
+          ($who | split(",") | map(gsub("^\\s+|\\s+$";""))) as $act
+          | [ .data.repository.pullRequest.reviewThreads.nodes[]
+              | select(.isResolved==false)
+              | .comments.nodes[0].author.login as $l
+              | select($act | index($l)) ]
+          | length
+        ' "$threads_json")
+
+        # ---- fix_rounds: max AI-Fix-Round trailer across PR commits ----
+        commits_json="$RUNNER_TEMP/commits.json"
+        gh api "repos/$REPO/pulls/$PR/commits" --paginate > "$commits_json"
+        fix_rounds=$(jq -r '
+          [ .[].commit.message
+            | capture("AI-Fix-Round:[ ]*(?<n>[0-9]+)";"g")? // empty
+            | .n | tonumber ] | (max // 0)
+        ' "$commits_json" 2>/dev/null || echo 0)
+        fix_rounds=${fix_rounds:-0}
+
+        # ---- touches_github: any changed path under .github/ ----
+        if gh pr diff "$PR" --repo "$REPO" --name-only | grep -q '^\.github/'; then
+          touches_github=true
+        else
+          touches_github=false
+        fi
+
+        # approvers as JSON array for the reason text
+        approvers_arr=$(printf '%s' "$HUMAN_APPROVERS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
+
+        # ---- build facts and decide ----
+        facts="$RUNNER_TEMP/facts.json"
+        jq -n \
+          --arg tier "$TIER" \
+          --argjson tests_ok "$tests_ok" \
+          --argjson high "$high" --argjson medium "$medium" --argjson low "$low" \
+          --argjson human_approved "$human_approved" \
+          --argjson human_changes_requested "$human_changes_requested" \
+          --argjson unresolved "$unresolved" \
+          --argjson fix_rounds "$fix_rounds" \
+          --argjson cap "$FIX_ROUND_CAP" \
+          --argjson automerge "$AUTOMERGE_ENABLED" \
+          --argjson touches "$touches_github" \
+          --argjson approvers "$approvers_arr" \
+          '{tier:$tier, tests_ok:$tests_ok,
+            counts:{high:$high,medium:$medium,low:$low},
+            human_approved:$human_approved,
+            human_changes_requested:$human_changes_requested,
+            unresolved_human_threads:$unresolved,
+            fix_rounds:$fix_rounds, fix_round_cap:$cap,
+            automerge_enabled:$automerge, touches_github:$touches,
+            approvers:$approvers}' > "$facts"
+        python3 "$GITHUB_ACTION_PATH/gate.py" "$facts" > "$RUNNER_TEMP/decision.json"
+        cat "$RUNNER_TEMP/decision.json"
+        decision=$(jq -r .decision "$RUNNER_TEMP/decision.json")
+        effective_tier=$(jq -r .effective_tier "$RUNNER_TEMP/decision.json")
+        reason=$(jq -r '.reasons | join("; ")' "$RUNNER_TEMP/decision.json")
+        # mowan/gate description <=140 chars.
+        desc=$(printf '%s: %s' "$decision" "$reason" | cut -c1-140)
+        case "$decision" in
+          merge|shadow) gate_state=success ;;
+          wait)         gate_state=pending ;;
+          block)        gate_state=pending ;;
+          needs-human)  gate_state=failure ;;
+          *)            gate_state=pending ;;
+        esac
+        gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+          -f state="$gate_state" -f context=mowan/gate -f description="$desc"
+
+        # ---- sticky comment (one, edited in place) ----
+        body="$RUNNER_TEMP/gate-comment.md"
+        {
+          echo "### mowan gate"
+          echo
+          echo "- tier: \`$TIER\` (effective: \`$effective_tier\`)"
+          echo "- decision: \`$decision\`"
+          echo "- fix round: $fix_rounds / $FIX_ROUND_CAP"
+          echo "- reasons: $reason"
+          echo
+          echo "<!-- mowan-gate -->"
+        } > "$body"
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq '[.[] | select(.body | contains("<!-- mowan-gate -->"))][0].id // empty')
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" --field body=@"$body" >/dev/null
+        else
+          gh pr comment "$PR" --repo "$REPO" --body-file "$body"
+        fi
+
+        # ---- label risk:<effective_tier>, removing other risk:* ----
+        for t in low medium high; do
+          if [ "$t" != "$effective_tier" ]; then
+            gh pr edit "$PR" --repo "$REPO" --remove-label "risk:$t" >/dev/null 2>&1 || true
+          fi
+        done
+        gh label create "risk:$effective_tier" --repo "$REPO" --force >/dev/null 2>&1 || true
+        gh pr edit "$PR" --repo "$REPO" --add-label "risk:$effective_tier" >/dev/null 2>&1 || true
+        if [ "$decision" = "needs-human" ]; then
+          gh label create "needs-human" --repo "$REPO" --force >/dev/null 2>&1 || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "needs-human" >/dev/null 2>&1 || true
+        fi
+
+        # ---- act ----
+        case "$decision" in
+          merge)
+            gh pr merge "$PR" --repo "$REPO" "--$MERGE_METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
+            ;;
+          block)
+            if [ -n "$CODER_WORKFLOW" ] && [ "${HEAD_REF#ai/}" != "$HEAD_REF" ] && [ "$fix_rounds" -lt "$FIX_ROUND_CAP" ]; then
+              gh workflow run "$CODER_WORKFLOW" --repo "$REPO" --ref "$DEFAULT_BRANCH" -f mode=fix -f number="$PR"
+            fi
+            ;;
+          needs-human)
+            # @-mention approvers once per head SHA (marker in the comment).
+            marker="<!-- mowan-needs-human sha=$HEAD_SHA -->"
+            already=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq "[.[] | select(.body | contains(\"$marker\"))] | length")
+            if [ "$already" = "0" ]; then
+              mentions=$(printf '%s' "$HUMAN_APPROVERS" | tr ',' ' ' | tr -s ' ' | sed 's/\([^ ][^ ]*\)/@\1/g')
+              m="$RUNNER_TEMP/needs-human.md"
+              { echo "This PR needs a human: $reason"; echo; echo "$mentions"; echo; echo "$marker"; } > "$m"
+              gh pr comment "$PR" --repo "$REPO" --body-file "$m"
+            fi
+            ;;
+        esac

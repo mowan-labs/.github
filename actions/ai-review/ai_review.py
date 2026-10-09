@@ -39,9 +39,29 @@ End your reply with ONLY this JSON object on its own, no prose after it:
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
-def write(path, verdict, body):
+# Fail-closed counts: any reviewer error is treated as one high finding, so
+# every tier blocks (spec section 3).
+FAIL_COUNTS = {"high": 1, "medium": 0, "low": 0}
+
+
+def count_findings(findings):
+    """Tally findings by severity into {"high","medium","low"}. Unknown
+    severities are ignored."""
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for f in findings or []:
+        sev = str(f.get("severity", "")).strip().lower()
+        if sev in counts:
+            counts[sev] += 1
+    return counts
+
+
+def write(path, verdict, body, counts=None):
+    """Write verdict.json. `counts` is written in ALL modes; legacy consumers
+    read only .verdict/.body and ignore it. On any error path counts default to
+    FAIL_COUNTS so the gate fails closed for every tier."""
     with open(path, "w") as fh:
-        json.dump({"verdict": verdict, "body": body[:MAX_BODY_CHARS]}, fh)
+        json.dump({"verdict": verdict, "body": body[:MAX_BODY_CHARS],
+                   "counts": counts if counts is not None else dict(FAIL_COUNTS)}, fh)
 
 
 def find_kiro():
@@ -109,7 +129,8 @@ def main(diff_path, out_path):
     with open(diff_path, errors="replace") as fh:
         diff = fh.read()
     if not diff.strip():
-        return write(out_path, "APPROVE", "**AI review: APPROVE**\n\nEmpty diff.")
+        return write(out_path, "APPROVE", "**AI review: APPROVE**\n\nEmpty diff.",
+                     counts={"high": 0, "medium": 0, "low": 0})
     if len(diff) > MAX_DIFF_CHARS:
         return write(out_path, "REQUEST_CHANGES",
                      "Diff is %d chars (limit %d): too large for automated review, needs a human."
@@ -120,7 +141,8 @@ def main(diff_path, out_path):
             raise ValueError("unexpected verdict %r" % result.get("verdict"))
     except Exception as exc:  # fail closed: a broken reviewer never approves
         return write(out_path, "REQUEST_CHANGES", "Reviewer error, not approving: %s" % exc)
-    write(out_path, result["verdict"], render(result))
+    write(out_path, result["verdict"], render(result),
+          counts=count_findings(result.get("findings")))
 
 
 if __name__ == "__main__":

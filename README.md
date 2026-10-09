@@ -63,3 +63,79 @@ KIRO_API_KEY=ksk_... scripts/onboard-repo.sh <repo-name|owner/repo> '<test comma
   token when that matters.
 - **Callers track `@mainline`.** Tag a release (`v1`) and pin callers to it once
   the workflow stabilises.
+
+## Tiered gate + AI coder
+
+A second, opt-in layer sits beside the legacy reviewer. It classifies every PR
+into **low / medium / high** risk and runs an AI coder that can open and self-fix
+PRs. The legacy `reusable-ai-review.yml` and `actions/ai-review` legacy mode are
+untouched; existing callers keep working.
+
+| Path | What it is |
+|---|---|
+| `.github/workflows/reusable-ai-gate.yml` | Reusable tiered gate: classify, test, review, decide |
+| `.github/workflows/reusable-ai-coder.yml` | Reusable AI coder: `implement` an issue / `fix` a PR |
+| `actions/risk-classify/` | `classify.py` + action: tier from the base-commit policy |
+| `actions/ai-gate/` | `gate.py` + action: pure decision + act (merge/dispatch/mention) |
+| `templates/caller-ai-gate.yml` | `.github/workflows/ai-gate.yml` each repo carries |
+| `templates/caller-ai-coder.yml` | `.github/workflows/ai-coder.yml` each repo carries |
+
+### Risk policy
+
+Each adopting repo adds `.github/risk-policy.json`, read from the PR's **base**
+commit (not head, so a PR cannot relax its own policy):
+
+```json
+{
+  "version": 1,
+  "high":   {"paths": ["infra/**"], "deleted_paths": ["**/tests/**"]},
+  "medium": {"paths": ["pipeline/**"], "max_changed_lines": 300}
+}
+```
+
+Any change under `.github/` is **high** regardless of policy (hard floor). A
+missing or invalid policy is treated as **medium**.
+
+### How a PR flows per tier
+
+1. **classify** writes `mowan/risk` (`tier=<low|medium|high>`).
+2. **tests** writes `mowan/tests` (`tests passed` / `tests failed`).
+3. **review** (tiered mode) posts one COMMENT review and writes `mowan/ai-review`
+   (`high=<n> medium=<n> low=<n>`) — never an APPROVE, because the bot cannot
+   approve its own PR.
+4. **decide** writes `mowan/gate` (`<decision>: <reason>`) and acts:
+   - **low** — merges after CI + an advisory review. A high finding escalates it
+     to medium.
+   - **medium** — merges only with a clean blocking review (no high/medium
+     findings) and CI green.
+   - **high** — also needs Mingchen's **approving** review at the reviewed head
+     commit.
+   - Any blocking state on an `ai/*` branch dispatches the coder to self-fix,
+     up to `fix-round-cap` (default 3), then escalates to `needs-human`.
+   - A PR that touches `.github/` is always `needs-human` (merge by hand).
+
+The statuses are the state of record, keyed by head SHA; a review-event run
+reuses recorded CI and review results instead of re-billing the model.
+
+### Statuses
+
+`mowan/risk`, `mowan/tests`, `mowan/ai-review`, `mowan/gate` — all keyed by the
+head SHA. The gate keeps one sticky PR comment (`<!-- mowan-gate -->`) showing
+tier, decision, reasons and fix round.
+
+### Kill switches
+
+- **`AI_AUTOMERGE`** — set the repo (or org) variable to `false` and the gate
+  runs fully but only reports **shadow** ("would merge"); nothing is merged.
+- **`AI_CODER`** — set to `false` to disable the coder (it exits 0 with a notice).
+
+### Shadow-mode onboarding
+
+Adopting repos set `AI_AUTOMERGE=false` at onboarding, so the gate observes and
+comments without merging until you trust it. Flip the variable to enable merges.
+
+### Known limit (free plan)
+
+As with the legacy reviewer, private repos on the free plan have no branch
+protection: **nothing stops a human from merging a red or un-gated PR by hand.**
+The gate's own merge step is the only automated gate.

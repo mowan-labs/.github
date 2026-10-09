@@ -1,0 +1,77 @@
+# Copied into each adopting repo as .github/workflows/ai-coder.yml.
+# All logic lives in mowan-labs/.github; edit there, not here.
+#
+# Fill in: __ALLOWED_ACTORS__, __AUTHOR_NAME__, __AUTHOR_EMAIL__.
+name: ai-coder
+
+on:
+  issues:
+    types: [labeled]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: implement | fix
+        required: true
+        type: string
+      number:
+        description: issue number (implement) or PR number (fix)
+        required: true
+        type: number
+
+# Serialize per subject; do NOT cancel in-progress (a running coder must finish).
+concurrency:
+  group: ai-coder-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  implement:
+    # Only when the `ai-code` label was just added to an issue.
+    if: ${{ github.event_name == 'issues' && github.event.label.name == 'ai-code' }}
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-coder.yml@mainline
+    with:
+      mode: implement
+      number: ${{ github.event.issue.number }}
+      allowed-actors: __ALLOWED_ACTORS__
+      commit-author-name: __AUTHOR_NAME__
+      commit-author-email: __AUTHOR_EMAIL__
+    secrets:
+      KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+
+  fix-from-review:
+    # Only for ai/* PRs when a review is submitted (changes requested or a
+    # comment). The reusable workflow authoritatively enforces that the feedback
+    # it acts on was written by an allowed actor; this is just a cheap prefilter.
+    if: >-
+      github.event_name == 'pull_request_review' &&
+      startsWith(github.event.pull_request.head.ref, 'ai/') &&
+      (github.event.review.state == 'changes_requested' || github.event.review.state == 'commented')
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-coder.yml@mainline
+    with:
+      mode: fix
+      number: ${{ github.event.pull_request.number }}
+      allowed-actors: __ALLOWED_ACTORS__
+      commit-author-name: __AUTHOR_NAME__
+      commit-author-email: __AUTHOR_EMAIL__
+    secrets:
+      KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+
+  dispatch:
+    # Manual re-run of either mode.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-coder.yml@mainline
+    with:
+      mode: ${{ github.event.inputs.mode }}
+      number: ${{ github.event.inputs.number }}
+      allowed-actors: __ALLOWED_ACTORS__
+      commit-author-name: __AUTHOR_NAME__
+      commit-author-email: __AUTHOR_EMAIL__
+    secrets:
+      KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
