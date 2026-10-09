@@ -1,0 +1,226 @@
+# Reusable tiered risk gate for mowan-labs repos (spec.md section 5).
+#
+# A PR is classified low / medium / high. Tests + a tiered AI review run, then
+# the decide job gathers the facts and either merges, waits, blocks (optionally
+# dispatching the AI coder to self-fix), or escalates to a human. The commit
+# statuses (mowan/risk, mowan/tests, mowan/ai-review, mowan/gate) are the state
+# of record, keyed by head SHA, so a review-event run reuses recorded work.
+#
+# Shadow mode: vars.AI_AUTOMERGE == 'false' turns every merge into a no-op
+# "would merge" result. Adopting repos set it to false at onboarding.
+name: ai-gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+      test-command:
+        required: false
+        type: string
+        default: ""
+      ci-result:
+        description: When the caller ran its own CI, pass needs.ci.result. success/failure is recorded to mowan/tests; skipped/'' with empty test-command falls back to the recorded status.
+        required: false
+        type: string
+        default: ""
+      policy-path:
+        required: false
+        type: string
+        default: .github/risk-policy.json
+      human-approvers:
+        required: true
+        type: string
+      allowed-actors:
+        required: true
+        type: string
+      fix-round-cap:
+        required: false
+        type: number
+        default: 3
+      coder-workflow:
+        description: Caller coder workflow filename (e.g. ai-coder.yml); empty disables auto-fix dispatch.
+        required: false
+        type: string
+        default: ""
+      merge-method:
+        required: false
+        type: string
+        default: squash
+      review-model:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      KIRO_API_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      default_branch: ${{ steps.pr.outputs.default_branch }}
+      proceed: ${{ steps.pr.outputs.proceed }}
+    steps:
+      - name: Resolve PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr-number }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPO/pulls/$PR")
+          state=$(printf '%s' "$pr" | jq -r .state)
+          draft=$(printf '%s' "$pr" | jq -r .draft)
+          {
+            echo "head_sha=$(printf '%s' "$pr" | jq -r .head.sha)"
+            echo "base_sha=$(printf '%s' "$pr" | jq -r .base.sha)"
+            echo "head_ref=$(printf '%s' "$pr" | jq -r .head.ref)"
+            echo "default_branch=$(printf '%s' "$pr" | jq -r .base.repo.default_branch)"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$state" != "open" ] || [ "$draft" = "true" ]; then
+            echo "PR closed or draft; stopping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  classify:
+    needs: context
+    if: ${{ needs.context.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      tier: ${{ steps.c.outputs.tier }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # mowan/risk is always recomputed (cheap).
+      - uses: mowan-labs/.github/actions/risk-classify@mainline
+        id: c
+        with:
+          pr-number: ${{ inputs.pr-number }}
+          base-sha: ${{ needs.context.outputs.base_sha }}
+          head-sha: ${{ needs.context.outputs.head_sha }}
+          policy-path: ${{ inputs.policy-path }}
+          github-token: ${{ github.token }}
+
+  tests:
+    needs: context
+    if: ${{ needs.context.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record tests status (reuse if present for this head SHA)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+          CI_RESULT: ${{ inputs.ci-result }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$REPO/commits/$HEAD_SHA/statuses" --paginate \
+            --jq '[.[] | select(.context=="mowan/tests")][0].state // ""')
+          if [ -n "$existing" ]; then
+            echo "mowan/tests already recorded ($existing) for $HEAD_SHA; reusing."
+            exit 0
+          fi
+          state=""
+          desc=""
+          if [ "$CI_RESULT" = "success" ]; then
+            state=success; desc="tests passed"
+          elif [ "$CI_RESULT" = "failure" ]; then
+            state=failure; desc="tests failed"
+          elif [ -n "$TEST_COMMAND" ]; then
+            if bash -c "$TEST_COMMAND"; then state=success; desc="tests passed"
+            else state=failure; desc="tests failed"; fi
+          else
+            echo "No ci-result and no test-command; leaving mowan/tests unset (gate waits)."
+            exit 0
+          fi
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state="$state" -f context=mowan/tests -f description="$desc"
+
+  review:
+    needs: context
+    if: ${{ needs.context.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Skip if a review is already recorded for this head SHA
+        id: recorded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$REPO/commits/$HEAD_SHA/statuses" --paginate \
+            --jq '[.[] | select(.context=="mowan/ai-review")][0].state // ""')
+          if [ -n "$existing" ]; then
+            echo "recorded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "recorded=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: ${{ steps.recorded.outputs.recorded == 'false' }}
+        with:
+          fetch-depth: 0
+      - uses: mowan-labs/.github/actions/ai-review@mainline
+        if: ${{ steps.recorded.outputs.recorded == 'false' }}
+        with:
+          mode: tiered
+          model: ${{ inputs.review-model || vars.REVIEW_MODEL }}
+          kiro-api-key: ${{ secrets.KIRO_API_KEY }}
+          pr-number: ${{ inputs.pr-number }}
+          base-sha: ${{ needs.context.outputs.base_sha }}
+          head-sha: ${{ needs.context.outputs.head_sha }}
+          github-token: ${{ github.token }}
+
+  decide:
+    needs: [context, classify, tests, review]
+    if: ${{ always() && needs.context.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      statuses: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mowan-labs/.github/actions/ai-gate@mainline
+        with:
+          pr-number: ${{ inputs.pr-number }}
+          head-sha: ${{ needs.context.outputs.head_sha }}
+          base-sha: ${{ needs.context.outputs.base_sha }}
+          tier: ${{ needs.classify.outputs.tier }}
+          human-approvers: ${{ inputs.human-approvers }}
+          allowed-actors: ${{ inputs.allowed-actors }}
+          fix-round-cap: ${{ inputs.fix-round-cap }}
+          # Kill switch: AI_AUTOMERGE=false -> shadow mode (would-merge, no merge).
+          automerge-enabled: ${{ vars.AI_AUTOMERGE != 'false' }}
+          merge-method: ${{ inputs.merge-method }}
+          coder-workflow: ${{ inputs.coder-workflow }}
+          default-branch: ${{ needs.context.outputs.default_branch }}
+          head-ref: ${{ needs.context.outputs.head_ref }}
+          github-token: ${{ github.token }}

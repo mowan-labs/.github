@@ -1,0 +1,45 @@
+# Copied into each adopting repo as .github/workflows/ai-gate.yml.
+# All logic lives in mowan-labs/.github; edit there, not here.
+#
+# Fill in: __TEST_COMMAND__ (or wire a ci-result), human-approvers, allowed-actors.
+name: ai-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to gate
+        required: true
+        type: number
+
+# One gate run per PR; a newer push/review cancels the older run.
+concurrency:
+  group: ai-gate-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  cancel-in-progress: true
+
+# A called workflow can never exceed the caller's permissions.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: write
+
+jobs:
+  gate:
+    uses: mowan-labs/.github/.github/workflows/reusable-ai-gate.yml@mainline
+    with:
+      pr-number: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+      test-command: __TEST_COMMAND__
+      human-approvers: __HUMAN_APPROVERS__
+      allowed-actors: __ALLOWED_ACTORS__
+      coder-workflow: ai-coder.yml
+      fix-round-cap: 3
+    # Explicit, not `inherit`: inherit only crosses into a reusable workflow
+    # owned by the SAME org, and personal-account repos call mowan-labs.
+    secrets:
+      KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}

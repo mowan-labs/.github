@@ -7,6 +7,10 @@ inputs:
     description: Optional Kiro model ID. Empty uses Kiro's default model.
     required: false
     default: ""
+  mode:
+    description: "legacy (default): approve/request-changes + fail. tiered: post a COMMENT review, set mowan/ai-review status, expose counts, exit 0."
+    required: false
+    default: "legacy"
   kiro-api-key:
     description: Kiro headless API key.
     required: false
@@ -37,6 +41,7 @@ runs:
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Ask the reviewer
+      id: review
       shell: bash
       env:
         KIRO_API_KEY: ${{ inputs.kiro-api-key }}
@@ -45,6 +50,7 @@ runs:
       run: python3 "$GITHUB_ACTION_PATH/ai_review.py" "$RUNNER_TEMP/diff.patch" "$RUNNER_TEMP/verdict.json"
 
     - name: Post review and set the gate
+      if: ${{ inputs.mode != 'tiered' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -60,3 +66,36 @@ runs:
           echo "::error::AI review did not approve"
           exit 1
         fi
+
+    - name: Post tiered review and set status
+      if: ${{ inputs.mode == 'tiered' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ inputs.pr-number }}
+        REPO: ${{ github.repository }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: |
+        high=$(jq -r '.counts.high' "$RUNNER_TEMP/verdict.json")
+        medium=$(jq -r '.counts.medium' "$RUNNER_TEMP/verdict.json")
+        low=$(jq -r '.counts.low' "$RUNNER_TEMP/verdict.json")
+        # Build the comment body: reviewer markdown + a machine-readable marker
+        # keyed by head SHA so the gate (and humans) can find the latest review.
+        {
+          jq -r .body "$RUNNER_TEMP/verdict.json"
+          printf '\n\n<!-- mowan-ai-review sha=%s high=%s medium=%s low=%s -->\n' "$HEAD_SHA" "$high" "$medium" "$low"
+        } > "$RUNNER_TEMP/body.md"
+        # COMMENT review only: github-actions[bot] cannot APPROVE its own PR, and
+        # a tiered gate must never approve on the human's behalf.
+        gh pr review "$PR" --repo "$REPO" --comment --body-file "$RUNNER_TEMP/body.md"
+        # mowan/ai-review always succeeds (even when blocking); the counts carry
+        # the signal. The gate job reads the counts, not this state.
+        gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+          -f state=success \
+          -f context=mowan/ai-review \
+          -f description="high=$high medium=$medium low=$low"
+        {
+          echo "high=$high"
+          echo "medium=$medium"
+          echo "low=$low"
+        } >> "$GITHUB_OUTPUT"
