@@ -126,5 +126,94 @@ class Classify(unittest.TestCase):
         self.assertEqual(r["tier"], "high")
 
 
+
+
+MCS_POLICY = json.dumps({
+    "version": 1,
+    "high": {"paths": [".kiro/agents/**", "infra/**", "docs/adr/**"],
+             "deleted_paths": ["**/tests/**"]},
+    "medium": {"paths": ["pipeline/**"], "max_changed_lines": 300},
+})
+
+
+class DocumentationIgnored(unittest.TestCase):
+    """Only changes that can alter system behaviour count toward the tier."""
+
+    def test_adr_only_pr_is_low_even_if_policy_lists_docs_high(self):
+        # PR #17's shape: a new ADR plus a design.md line.
+        r = classify.classify(MCS_POLICY,
+                              ["docs/adr/0013-ontology.md", "docs/design.md"], [],
+                              {"docs/adr/0013-ontology.md": 181, "docs/design.md": 1})
+        self.assertEqual(r["tier"], "low")
+        self.assertIn("documentation only", r["reasons"])
+
+    def test_readme_inside_high_dir_is_ignored(self):
+        r = classify.classify(MCS_POLICY, ["infra/README.md"], [], {"infra/README.md": 4})
+        self.assertEqual(r["tier"], "low")
+
+    def test_code_next_to_docs_still_classified(self):
+        r = classify.classify(MCS_POLICY, ["docs/adr/0012.md", "infra/lib/config.ts"], [],
+                              {"docs/adr/0012.md": 50, "infra/lib/config.ts": 2})
+        self.assertEqual(r["tier"], "high")
+        self.assertTrue(any("infra/lib/config.ts" in x for x in r["reasons"]))
+        self.assertFalse(any("high path docs/" in x for x in r["reasons"]))
+
+    def test_doc_lines_do_not_count_toward_line_budget(self):
+        r = classify.classify(MCS_POLICY, ["docs/big.md", "src/app.py"], [],
+                              {"docs/big.md": 900, "src/app.py": 10})
+        self.assertEqual(r["tier"], "low")
+
+    def test_code_lines_still_count_toward_line_budget(self):
+        r = classify.classify(MCS_POLICY, ["docs/big.md", "src/app.py"], [],
+                              {"docs/big.md": 900, "src/app.py": 301})
+        self.assertEqual(r["tier"], "medium")
+
+    def test_int_line_total_keeps_legacy_behaviour(self):
+        r = classify.classify(MCS_POLICY, ["src/app.py", "README.md"], [], 301)
+        self.assertEqual(r["tier"], "medium")
+
+    def test_agent_prompt_markdown_is_behaviour(self):
+        r = classify.classify(MCS_POLICY, [".kiro/agents/prompts/engineer.md"], [], 3)
+        self.assertEqual(r["tier"], "high")
+
+    def test_skill_and_agents_md_are_behaviour(self):
+        for p in ["skills/x/SKILL.md", "AGENTS.md", "pkg/CLAUDE.md"]:
+            self.assertFalse(classify.is_non_behavioral(p, {}), p)
+
+    def test_github_markdown_stays_high(self):
+        r = classify.classify(MCS_POLICY, [".github/PULL_REQUEST_TEMPLATE.md"], [], 1)
+        self.assertEqual(r["tier"], "high")
+
+    def test_deleted_doc_under_tests_is_ignored(self):
+        r = classify.classify(MCS_POLICY, [], ["pipeline/tests/README.md"], 0)
+        self.assertEqual(r["tier"], "low")
+
+    def test_deleted_test_code_still_high(self):
+        r = classify.classify(MCS_POLICY, ["docs/x.md"], ["pipeline/tests/test_a.py"], 5)
+        self.assertEqual(r["tier"], "high")
+
+    def test_requirements_txt_is_not_documentation(self):
+        self.assertFalse(classify.is_non_behavioral("pipeline/requirements.txt", {}))
+
+    def test_policy_can_override_lists(self):
+        pol = json.loads(MCS_POLICY)
+        pol["non_behavioral"] = {"paths": ["**/*.md"], "except": ["docs/adr/**"]}
+        r = classify.classify(json.dumps(pol), ["docs/adr/1.md"], [], 1)
+        self.assertEqual(r["tier"], "high")
+
+    def test_invalid_non_behavioral_shape_is_medium(self):
+        pol = json.loads(MCS_POLICY)
+        pol["non_behavioral"] = ["docs/**"]
+        r = classify.classify(json.dumps(pol), ["docs/a.md"], [], 1)
+        self.assertEqual(r["tier"], "medium")
+
+
+class ParseNumstatByPath(unittest.TestCase):
+    def test_plain_binary_and_rename(self):
+        text = "10\t5\ta.py\0-\t-\timg.png\0" "3\t1\t\0docs/old.md\0docs/new.md\0"
+        self.assertEqual(classify.parse_numstat_by_path(text),
+                         {"a.py": 15, "img.png": 0, "docs/new.md": 4})
+
+
 if __name__ == "__main__":
     unittest.main()
