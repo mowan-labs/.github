@@ -96,6 +96,23 @@ commit (not head, so a PR cannot relax its own policy):
 Any change under `.github/` is **high** regardless of policy (hard floor). A
 missing or invalid policy is treated as **medium**.
 
+Only changes that can alter system behaviour count. Documentation is dropped
+from the changed paths, the deleted paths and the line budget before the
+`high`/`medium` rules run, so a docs-only PR is **low** and a README inside
+`infra/` does not make a PR high. The defaults, which a policy can override with
+an optional `non_behavioral` block:
+
+```json
+"non_behavioral": {
+  "paths":  ["docs/**", "**/*.md", "**/*.rst", "**/*.adoc",
+             "**/LICENSE", "**/LICENSE.*", "**/NOTICE", "**/NOTICE.*"],
+  "except": [".kiro/**", "**/prompts/**", "**/SKILL.md", "**/AGENTS.md", "**/CLAUDE.md"]
+}
+```
+
+`except` keeps agent-instruction markdown in scope, because prompts change what
+an agent does.
+
 ### How a PR flows per tier
 
 1. **classify** writes `mowan/risk` (`tier=<low|medium|high>`).
