@@ -80,7 +80,39 @@ untouched; existing callers keep working.
 | `templates/caller-ai-gate.yml` | `.github/workflows/ai-gate.yml` each repo carries |
 | `templates/caller-ai-coder.yml` | `.github/workflows/ai-coder.yml` each repo carries |
 
-### Risk policy
+### How a PR is classified
+
+The classifier judges the PR as a whole, by what it does rather than where it
+lands (`classifier-mode: llm`, the default). Kiro reads the whole diff and
+decides the kind of change:
+
+| Kind | Meaning | Example |
+|---|---|---|
+| `docs` | Nothing that runs changes | ADR, README, docstring |
+| `structural` | Same inputs give the same outputs, side effects and deployed resources | Renaming a code constant whose value is unchanged; moving or extracting code |
+| `behavioral` | Different outputs, side effects, errors or contracts for the same inputs | Feature, bug fix, model or threshold change, renamed CLI/job argument |
+| `deployed-state` | Changes what exists in the cloud or how it is reached | New table; renamed physical `tableName` or CDK construct ID (resource replaced); IAM |
+
+From the kind it picks the tier: docs and structural are low; behavioral is
+medium (low when small, local and tested; high when it deletes or weakens
+tests or touches CI); deployed-state is medium when it only adds or updates in
+place, and high when it replaces, deletes or exposes something. The
+`mowan/risk` status reads `tier=<t> kind=<k> (llm)`, and a sticky
+"mowan risk" comment lists the kind of each changed file. The verdict is
+reused for later events on the same head commit.
+
+The path rules below are passed to the model as hints and are the fallback
+when Kiro is unavailable, errors, or the diff exceeds 150k characters
+(`(rules)` in the status). Only the `.github/` floor overrides the model.
+A policy can add trusted repo context for the model, read from the base commit:
+`"classifier": {"guidance": "Nothing is deployed yet."}`.
+
+Accepted risk: the diff is untrusted, so a prompt injection could argue its own
+tier down. That is accepted for personal projects
+([#13](https://github.com/mowan-labs/.github/issues/13)); set
+`classifier-mode: rules` or revisit before productionizing.
+
+### Risk policy (path rules: hints and fallback)
 
 Each adopting repo adds `.github/risk-policy.json`, read from the PR's **base**
 commit (not head, so a PR cannot relax its own policy):
@@ -115,7 +147,7 @@ an agent does.
 
 ### How a PR flows per tier
 
-1. **classify** writes `mowan/risk` (`tier=<low|medium|high>`).
+1. **classify** writes `mowan/risk` (`tier=<t> kind=<k> (llm|rules)`).
 2. **tests** writes `mowan/tests` (`tests passed` / `tests failed`).
 3. **review** (tiered mode) posts one COMMENT review and writes `mowan/ai-review`
    (`high=<n> medium=<n> low=<n>`) — never an APPROVE, because the bot cannot
@@ -130,9 +162,9 @@ an agent does.
    - Any blocking state on an `ai/*` branch dispatches the coder to self-fix,
      up to `fix-round-cap` (default 3), then escalates to `needs-human`.
    - A PR that touches `.github/` is always `needs-human` (merge by hand).
-   - **Linked issue:** any PR that changes behaviour (anything but a
-     documentation-only diff) waits until it links an issue with `Closes #N`
-     in its body. Docs-only PRs, such as ADRs, are exempt. The gate reads
+   - **Linked issue:** a PR classified `behavioral` or `deployed-state`
+     waits until it links an issue with `Closes #N` in its body. `docs` and
+     `structural` PRs, such as ADRs or pure renames, are exempt. The gate reads
      GitHub's closing references and also parses the body, because GitHub
      does not always register the link. After a merge the gate closes any
      linked issue still open, with a comment naming the PR. Editing the body
