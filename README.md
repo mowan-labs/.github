@@ -130,6 +130,14 @@ an agent does.
    - Any blocking state on an `ai/*` branch dispatches the coder to self-fix,
      up to `fix-round-cap` (default 3), then escalates to `needs-human`.
    - A PR that touches `.github/` is always `needs-human` (merge by hand).
+   - **Linked issue:** any PR that changes behaviour (anything but a
+     documentation-only diff) waits until it links an issue with `Closes #N`
+     in its body. Docs-only PRs, such as ADRs, are exempt. The gate reads
+     GitHub's closing references and also parses the body, because GitHub
+     does not always register the link. After a merge the gate closes any
+     linked issue still open, with a comment naming the PR. Editing the body
+     re-runs the gate (`edited` trigger). Turn it off per repo with
+     `require-linked-issue: false`.
 
 The statuses are the state of record, keyed by head SHA; a review-event run
 reuses recorded CI and review results instead of re-billing the model.
