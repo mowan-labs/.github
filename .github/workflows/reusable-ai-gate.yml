@@ -52,6 +52,11 @@ on:
         required: false
         type: string
         default: ""
+      classifier-mode:
+        description: "llm (default) judges the whole diff with Kiro; rules uses path rules only."
+        required: false
+        type: string
+        default: llm
       require-linked-issue:
         description: Hold behavior-changing (non-docs) PRs until they link an issue with 'Closes #N'.
         required: false
@@ -106,6 +111,7 @@ jobs:
     permissions:
       contents: read
       statuses: write
+      pull-requests: write
     outputs:
       tier: ${{ steps.c.outputs.tier }}
       behavioral: ${{ steps.c.outputs.behavioral }}
@@ -122,6 +128,9 @@ jobs:
           head-sha: ${{ needs.context.outputs.head_sha }}
           policy-path: ${{ inputs.policy-path }}
           github-token: ${{ github.token }}
+          mode: ${{ inputs.classifier-mode }}
+          kiro-api-key: ${{ secrets.KIRO_API_KEY }}
+          model: ${{ inputs.review-model || vars.REVIEW_MODEL }}
 
   tests:
     needs: context
@@ -220,7 +229,7 @@ jobs:
           head-sha: ${{ needs.context.outputs.head_sha }}
           base-sha: ${{ needs.context.outputs.base_sha }}
           tier: ${{ needs.classify.outputs.tier }}
-          # Fail closed: only an explicit docs-only verdict skips the issue check.
+          # Fail closed: only an explicit docs/structural verdict skips the issue check.
           issue-required: ${{ inputs.require-linked-issue && needs.classify.outputs.behavioral != 'false' }}
           human-approvers: ${{ inputs.human-approvers }}
           allowed-actors: ${{ inputs.allowed-actors }}

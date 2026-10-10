@@ -13,7 +13,7 @@ Decision order (first that applies wins):
   4. not fixable_ok: fix_rounds >= cap -> needs-human "fix-round cap reached";
      else block (reason lists each failing item).
   5. issue_required and no linked_issues -> wait "behavior change has no
-     linked issue". issue_required is set for behavioral (non-docs) PRs.
+     linked issue". issue_required is set for behavioral / deployed-state PRs.
   5b. effective_tier high and not human_approved -> wait "needs approval ...".
   6. touches_github -> needs-human "PR changes .github/; merge by hand".
   7. not automerge_enabled -> shadow "would merge (AI_AUTOMERGE=false)".

@@ -1,8 +1,10 @@
 name: mowan risk classify
 description: >-
-  Classify a PR into low / medium / high risk from the base-commit policy and
-  the changed/deleted paths and line counts (spec.md section 1). Writes the
-  mowan/risk commit status and exposes the tier + reasons as step outputs.
+  Classify a PR into low / medium / high risk. In llm mode (default) an LLM
+  judges the whole diff as docs / structural / behavioral / deployed-state and
+  picks the tier; the path rules from the base-commit policy are its hints and
+  the fallback. Writes the mowan/risk status, one sticky "mowan risk" PR
+  comment, and exposes tier / kind / behavioral / reasons as outputs.
 
 inputs:
   pr-number:
@@ -17,6 +19,18 @@ inputs:
     default: .github/risk-policy.json
   github-token:
     required: true
+  mode:
+    description: "llm (whole-PR LLM judgement, path rules as fallback) or rules (path rules only)."
+    required: false
+    default: llm
+  kiro-api-key:
+    description: Needed for llm mode; without it the path rules apply.
+    required: false
+    default: ""
+  model:
+    description: Optional Kiro model ID for the classifier.
+    required: false
+    default: ""
 
 outputs:
   tier:
@@ -26,12 +40,35 @@ outputs:
     description: JSON array of reasons that fired.
     value: ${{ steps.run.outputs.reasons }}
   behavioral:
-    description: "'false' only for a documentation-only PR; otherwise 'true'."
+    description: "'true' for behavioral / deployed-state changes; 'false' for docs or structural."
     value: ${{ steps.run.outputs.behavioral }}
+  kind:
+    description: docs | structural | behavioral | deployed-state
+    value: ${{ steps.run.outputs.kind }}
 
 runs:
   using: composite
   steps:
+    - name: Path rules (hints and fallback)
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        POLICY_PATH: ${{ inputs.policy-path }}
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/classify.py" "$BASE_SHA" "$HEAD_SHA" "$POLICY_PATH" "$RUNNER_TEMP/rules.json"
+        # Policy from the BASE commit only (a PR must not rewrite its own guidance).
+        git show "$BASE_SHA:$POLICY_PATH" > "$RUNNER_TEMP/policy.json" 2>/dev/null || : > "$RUNNER_TEMP/policy.json"
+        git diff "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/classify-diff.patch"
+
+    - name: Install Kiro CLI
+      if: ${{ inputs.mode == 'llm' && inputs.kiro-api-key != '' }}
+      shell: bash
+      run: |
+        command -v kiro-cli >/dev/null 2>&1 || curl -fsSL https://cli.kiro.dev/install | bash
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
     - name: Classify and set mowan/risk
       id: run
       shell: bash
@@ -40,20 +77,73 @@ runs:
         HEAD_SHA: ${{ inputs.head-sha }}
         POLICY_PATH: ${{ inputs.policy-path }}
         GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ inputs.pr-number }}
+        MODE: ${{ inputs.mode }}
+        KIRO_API_KEY: ${{ inputs.kiro-api-key }}
+        CLASSIFY_MODEL: ${{ inputs.model }}
+        NO_COLOR: "1"
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        python3 "$GITHUB_ACTION_PATH/classify.py" "$BASE_SHA" "$HEAD_SHA" "$POLICY_PATH" "$RUNNER_TEMP/risk.json"
+        # An LLM verdict recorded for this exact head SHA is reused, so review
+        # and comment events do not re-bill the model. Rules verdicts are cheap
+        # and always recomputed.
+        recorded=$(gh api "repos/$REPO/commits/$HEAD_SHA/statuses" --paginate \
+          --jq '[.[] | select(.context=="mowan/risk")][0].description // ""')
+        if [ "$MODE" = "llm" ] && python3 "$GITHUB_ACTION_PATH/llm_classify.py" reuse "$recorded" > "$RUNNER_TEMP/reused.json"; then
+          echo "Reusing recorded LLM verdict for $HEAD_SHA: $recorded"
+          {
+            echo "tier=$(jq -r .tier "$RUNNER_TEMP/reused.json")"
+            echo "reasons=$(jq -c .reasons "$RUNNER_TEMP/reused.json")"
+            echo "behavioral=$(jq -r 'if .behavioral then "true" else "false" end' "$RUNNER_TEMP/reused.json")"
+            echo "kind=$(jq -r .kind "$RUNNER_TEMP/reused.json")"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ "$MODE" = "llm" ]; then
+          python3 "$GITHUB_ACTION_PATH/llm_classify.py" "$RUNNER_TEMP/classify-diff.patch" \
+            "$RUNNER_TEMP/rules.json" "$RUNNER_TEMP/policy.json" "$RUNNER_TEMP/risk.json"
+        else
+          jq '. + {kind: (if .behavioral == false then "docs" else "behavioral" end), source: "rules", changes: []}' \
+            "$RUNNER_TEMP/rules.json" > "$RUNNER_TEMP/risk.json"
+        fi
         tier=$(jq -r .tier "$RUNNER_TEMP/risk.json")
+        kind=$(jq -r '.kind // "behavioral"' "$RUNNER_TEMP/risk.json")
+        source=$(jq -r '.source // "rules"' "$RUNNER_TEMP/risk.json")
         reasons=$(jq -c .reasons "$RUNNER_TEMP/risk.json")
         behavioral=$(jq -r 'if .behavioral == false then "false" else "true" end' "$RUNNER_TEMP/risk.json")
         {
           echo "tier=$tier"
           echo "reasons=$reasons"
           echo "behavioral=$behavioral"
+          echo "kind=$kind"
         } >> "$GITHUB_OUTPUT"
         # mowan/risk is always recomputed (cheap); state of record keyed by head SHA.
         gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
           -f state=success \
           -f context=mowan/risk \
-          -f description="tier=$tier"
+          -f description="tier=$tier kind=$kind ($source)"
+
+        # One sticky comment explaining the verdict, edited in place.
+        body="$RUNNER_TEMP/risk-comment.md"
+        {
+          echo "### mowan risk"
+          echo
+          echo "- tier: \`$tier\`, kind: \`$kind\` (decided by: $source)"
+          jq -r '.reasons[] | "- " + (. | tostring | gsub("\n"; " "))' "$RUNNER_TEMP/risk.json"
+          if [ "$(jq '.changes | length' "$RUNNER_TEMP/risk.json")" != "0" ]; then
+            echo
+            echo "| Path | Kind | Why |"
+            echo "|---|---|---|"
+            jq -r '.changes[] | "| `\(.path // "?")` | \(.kind // "?") | \((.why // "") | tostring | gsub("[|\n]"; " ")) |"' "$RUNNER_TEMP/risk.json"
+          fi
+          echo
+          echo "<!-- mowan-risk -->"
+        } > "$body"
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq '[.[] | select(.body | contains("<!-- mowan-risk -->"))][0].id // empty')
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" --field body=@"$body" >/dev/null
+        else
+          gh pr comment "$PR" --repo "$REPO" --body-file "$body" >/dev/null
+        fi
