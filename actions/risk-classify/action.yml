@@ -25,6 +25,9 @@ outputs:
   reasons:
     description: JSON array of reasons that fired.
     value: ${{ steps.run.outputs.reasons }}
+  behavioral:
+    description: "'false' only for a documentation-only PR; otherwise 'true'."
+    value: ${{ steps.run.outputs.behavioral }}
 
 runs:
   using: composite
@@ -43,9 +46,11 @@ runs:
         python3 "$GITHUB_ACTION_PATH/classify.py" "$BASE_SHA" "$HEAD_SHA" "$POLICY_PATH" "$RUNNER_TEMP/risk.json"
         tier=$(jq -r .tier "$RUNNER_TEMP/risk.json")
         reasons=$(jq -c .reasons "$RUNNER_TEMP/risk.json")
+        behavioral=$(jq -r 'if .behavioral == false then "false" else "true" end' "$RUNNER_TEMP/risk.json")
         {
           echo "tier=$tier"
           echo "reasons=$reasons"
+          echo "behavioral=$behavioral"
         } >> "$GITHUB_OUTPUT"
         # mowan/risk is always recomputed (cheap); state of record keyed by head SHA.
         gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \

@@ -12,7 +12,9 @@ Decision order (first that applies wins):
                   and unresolved_human_threads == 0
   4. not fixable_ok: fix_rounds >= cap -> needs-human "fix-round cap reached";
      else block (reason lists each failing item).
-  5. effective_tier high and not human_approved -> wait "needs approval ...".
+  5. issue_required and no linked_issues -> wait "behavior change has no
+     linked issue". issue_required is set for behavioral (non-docs) PRs.
+  5b. effective_tier high and not human_approved -> wait "needs approval ...".
   6. touches_github -> needs-human "PR changes .github/; merge by hand".
   7. not automerge_enabled -> shadow "would merge (AI_AUTOMERGE=false)".
   8. else merge.
@@ -26,6 +28,8 @@ import sys
 # status must not let a low-tier PR merge unreviewed), so counts are forced to
 # one high finding. spec.md section 3 (reviewer errors are {high:1}).
 REVIEW_NOT_RECORDED = "AI review not recorded for head SHA"
+LINK_ISSUE_REASON = ("behavior change has no linked issue: open one if none "
+                     "exists and add 'Closes #N' to the PR body")
 _FAIL_CLOSED_COUNTS = {"high": 1, "medium": 0, "low": 0}
 _COUNTS_RE = re.compile(r"high=(\d+)\s+medium=(\d+)\s+low=(\d+)")
 
@@ -56,7 +60,7 @@ def counts_from_status(description):
 def decide(tier, tests_ok, counts, human_approved, human_changes_requested,
            unresolved_human_threads, fix_rounds, fix_round_cap,
            automerge_enabled, touches_github, approvers=None,
-           review_reason=None):
+           review_reason=None, issue_required=False, linked_issues=None):
     high = int(counts.get("high", 0))
     medium = int(counts.get("medium", 0))
     approvers = approvers or []
@@ -107,7 +111,11 @@ def decide(tier, tests_ok, counts, human_approved, human_changes_requested,
             return result("needs-human", ["fix-round cap reached (%d/%d)" % (fix_rounds, fix_round_cap)] + fail_items)
         return result("block", fail_items)
 
-    # 5. High needs approval.
+    # 5. Behavior changes must be tracked by an issue (docs-only PRs exempt).
+    if issue_required and not linked_issues:
+        return result("wait", [LINK_ISSUE_REASON])
+
+    # 5b. High needs approval.
     if effective_tier == "high" and not human_approved:
         who = ", ".join(approvers) if approvers else "an approver"
         return result("wait", ["needs approval from %s" % who])
@@ -122,6 +130,22 @@ def decide(tier, tests_ok, counts, human_approved, human_changes_requested,
 
     # 8. Merge.
     return result("merge", ["tests + review pass; auto-merging"])
+
+
+_ISSUE_REF_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.IGNORECASE)
+
+
+def issue_refs_from_body(body):
+    """Issue numbers named by GitHub closing keywords ('Closes #12') in a PR
+    body. Pure. Used as a fallback because GitHub does not always register the
+    link (mowan-company-search #14 said 'Closes #13' and showed no link)."""
+    seen = []
+    for m in _ISSUE_REF_RE.finditer(body or ""):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+    return seen
 
 
 def _to_tests_ok(v):
@@ -140,6 +164,10 @@ def _to_tests_ok(v):
 def main(argv):
     # `counts` subcommand: parse a mowan/ai-review status description (stdin or
     # argv[2]) into fail-closed counts + reason. Used by the action.
+    if len(argv) > 1 and argv[1] == "issue-refs":
+        print(json.dumps(issue_refs_from_body(sys.stdin.read())))
+        return 0
+
     if len(argv) > 1 and argv[1] == "counts":
         if len(argv) > 2:
             desc = argv[2]
@@ -180,6 +208,8 @@ def main(argv):
         touches_github=bool(facts.get("touches_github")),
         approvers=facts.get("approvers") or [],
         review_reason=review_reason,
+        issue_required=bool(facts.get("issue_required")),
+        linked_issues=facts.get("linked_issues") or [],
     )
     print(json.dumps(result))
     return 0

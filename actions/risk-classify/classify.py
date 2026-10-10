@@ -139,6 +139,17 @@ def _is_str_list(v):
 
 
 def classify(policy_text, changed_paths, deleted_paths, changed_lines):
+    """Classify and flag whether the PR changes system behaviour.
+
+    Returns {"tier", "reasons", "behavioral"}. `behavioral` is False only for a
+    documentation-only PR; the gate requires a linked issue when it is True.
+    """
+    result = _classify_tier(policy_text, changed_paths, deleted_paths, changed_lines)
+    result["behavioral"] = result.pop("_behavioral", True)
+    return result
+
+
+def _classify_tier(policy_text, changed_paths, deleted_paths, changed_lines):
     """Pure classifier. policy_text is the raw base-commit policy file content
     (or None if absent). Returns {"tier", "reasons"}.
 
@@ -181,7 +192,8 @@ def classify(policy_text, changed_paths, deleted_paths, changed_lines):
 
     # Rule 2b: documentation only.
     if not changed_paths and not deleted_paths:
-        return {"tier": "low", "reasons": reasons + ["documentation only"]}
+        return {"tier": "low", "reasons": reasons + ["documentation only"],
+                "_behavioral": False}
 
     # Rule 3: high paths / high deleted paths.
     hit = False

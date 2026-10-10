@@ -14,6 +14,10 @@ inputs:
     required: true
   tier:
     required: true
+  issue-required:
+    description: "'true' when the PR changes behavior and must link an issue."
+    required: false
+    default: "true"
   human-approvers:
     description: Comma-separated logins allowed to give the approving review.
     required: true
@@ -52,6 +56,7 @@ runs:
         HEAD_SHA: ${{ inputs.head-sha }}
         BASE_SHA: ${{ inputs.base-sha }}
         TIER: ${{ inputs.tier }}
+        ISSUE_REQUIRED: ${{ inputs.issue-required }}
         HUMAN_APPROVERS: ${{ inputs.human-approvers }}
         ALLOWED_ACTORS: ${{ inputs.allowed-actors }}
         FIX_ROUND_CAP: ${{ inputs.fix-round-cap }}
@@ -146,6 +151,33 @@ runs:
           touches_github=false
         fi
 
+        # ---- linked issues: GitHub's closing references plus 'Closes #N' in
+        # the body (fallback: GitHub did not register #14 -> #13). Keep only
+        # numbers that are real issues in this repo, not PRs.
+        linked_json="$RUNNER_TEMP/linked.json"
+        gh api graphql -f owner="$owner" -f name="$name" -F pr="$PR" -f query='
+          query($owner:String!,$name:String!,$pr:Int!){
+            repository(owner:$owner,name:$name){
+              pullRequest(number:$pr){
+                body
+                closingIssuesReferences(first:20){ nodes{ number } }
+              }}}' > "$linked_json"
+        body_refs=$(jq -r '.data.repository.pullRequest.body // ""' "$linked_json" \
+          | python3 "$GITHUB_ACTION_PATH/gate.py" issue-refs)
+        candidates=$(jq -r --argjson b "$body_refs" \
+          '([.data.repository.pullRequest.closingIssuesReferences.nodes[].number] + $b) | unique | .[]' "$linked_json")
+        linked=()
+        for n in $candidates; do
+          is_issue=$(gh api "repos/$REPO/issues/$n" --jq 'if .pull_request then "no" else "yes" end' 2>/dev/null || echo no)
+          [ "$is_issue" = "yes" ] && linked+=("$n")
+        done
+        if [ ${#linked[@]} -gt 0 ]; then
+          linked_arr=$(printf '%s\n' "${linked[@]}" | jq -R 'tonumber' | jq -s .)
+        else
+          linked_arr='[]'
+        fi
+        case "$ISSUE_REQUIRED" in true) issue_required=true ;; *) issue_required=false ;; esac
+
         # approvers as JSON array for the reason text
         approvers_arr=$(printf '%s' "$HUMAN_APPROVERS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
 
@@ -164,6 +196,8 @@ runs:
           --argjson touches "$touches_github" \
           --argjson approvers "$approvers_arr" \
           --arg review_reason "$review_reason" \
+          --argjson issue_required "$issue_required" \
+          --argjson linked "$linked_arr" \
           '{tier:$tier, tests_ok:$tests_ok,
             counts:{high:$high,medium:$medium,low:$low},
             human_approved:$human_approved,
@@ -172,6 +206,7 @@ runs:
             fix_rounds:$fix_rounds, fix_round_cap:$cap,
             automerge_enabled:$automerge, touches_github:$touches,
             approvers:$approvers,
+            issue_required:$issue_required, linked_issues:$linked,
             review_reason:(if $review_reason=="" then null else $review_reason end)}' > "$facts"
         python3 "$GITHUB_ACTION_PATH/gate.py" "$facts" > "$RUNNER_TEMP/decision.json"
         cat "$RUNNER_TEMP/decision.json"
@@ -198,6 +233,13 @@ runs:
           echo "- tier: \`$TIER\` (effective: \`$effective_tier\`)"
           echo "- decision: \`$decision\`"
           echo "- fix round: $fix_rounds / $FIX_ROUND_CAP"
+          if [ "$linked_arr" != "[]" ]; then
+            echo "- linked issues: $(printf '%s' "$linked_arr" | jq -r 'map("#\(.)") | join(", ")')"
+          elif [ "$issue_required" = "true" ]; then
+            echo "- linked issues: none (required for behavior changes)"
+          else
+            echo "- linked issues: none (not required: documentation only)"
+          fi
           echo "- reasons: $reason"
           echo
           echo "<!-- mowan-gate -->"
@@ -227,6 +269,16 @@ runs:
         case "$decision" in
           merge)
             gh pr merge "$PR" --repo "$REPO" "--$MERGE_METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
+            # A GITHUB_TOKEN merge does not reliably close linked issues; close
+            # any still open, pointing at the PR and its merge commit.
+            merge_sha=$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid // ""')
+            for n in $(printf '%s' "$linked_arr" | jq -r '.[]'); do
+              st=$(gh api "repos/$REPO/issues/$n" --jq .state 2>/dev/null || echo "")
+              if [ "$st" = "open" ]; then
+                gh issue close "$n" --repo "$REPO" --reason completed \
+                  --comment "Done in #$PR (merge commit ${merge_sha:0:7})." || true
+              fi
+            done
             ;;
           block)
             if [ -n "$CODER_WORKFLOW" ] && [ "${HEAD_REF#ai/}" != "$HEAD_REF" ] && [ "$fix_rounds" -lt "$FIX_ROUND_CAP" ]; then

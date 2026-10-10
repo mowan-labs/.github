@@ -52,6 +52,11 @@ on:
         required: false
         type: string
         default: ""
+      require-linked-issue:
+        description: Hold behavior-changing (non-docs) PRs until they link an issue with 'Closes #N'.
+        required: false
+        type: boolean
+        default: true
     secrets:
       KIRO_API_KEY:
         required: false
@@ -103,6 +108,7 @@ jobs:
       statuses: write
     outputs:
       tier: ${{ steps.c.outputs.tier }}
+      behavioral: ${{ steps.c.outputs.behavioral }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -214,6 +220,8 @@ jobs:
           head-sha: ${{ needs.context.outputs.head_sha }}
           base-sha: ${{ needs.context.outputs.base_sha }}
           tier: ${{ needs.classify.outputs.tier }}
+          # Fail closed: only an explicit docs-only verdict skips the issue check.
+          issue-required: ${{ inputs.require-linked-issue && needs.classify.outputs.behavioral != 'false' }}
           human-approvers: ${{ inputs.human-approvers }}
           allowed-actors: ${{ inputs.allowed-actors }}
           fix-round-cap: ${{ inputs.fix-round-cap }}
