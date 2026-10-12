@@ -43,6 +43,14 @@ inputs:
     required: true
   github-token:
     required: true
+  merge-token:
+    description: >-
+      Optional GitHub App installation token used ONLY for the `gh pr merge`
+      command, so the merge push triggers push-driven workflows (ci -> deploy).
+      Empty (default) -> the merge falls back to github-token. Everything else
+      the action does keeps using github-token.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -51,6 +59,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        MERGE_TOKEN: ${{ inputs.merge-token }}
         REPO: ${{ github.repository }}
         PR: ${{ inputs.pr-number }}
         HEAD_SHA: ${{ inputs.head-sha }}
@@ -268,7 +277,17 @@ runs:
         # ---- act ----
         case "$decision" in
           merge)
-            gh pr merge "$PR" --repo "$REPO" "--$MERGE_METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
+            # Merge with the GitHub App token when one was minted, else fall
+            # back to github.token. A GITHUB_TOKEN push does not trigger other
+            # workflows (ci -> deploy); an App token push does. Only this one
+            # command uses the App token; never log the token itself.
+            if [ -n "${MERGE_TOKEN:-}" ]; then
+              echo "merging with GitHub App token (push triggers downstream workflows)"
+            else
+              echo "merging with GITHUB_TOKEN (no App token configured; push will not trigger downstream workflows)"
+            fi
+            GH_TOKEN="${MERGE_TOKEN:-$GH_TOKEN}" \
+              gh pr merge "$PR" --repo "$REPO" "--$MERGE_METHOD" --delete-branch --match-head-commit "$HEAD_SHA"
             # A GITHUB_TOKEN merge does not reliably close linked issues; close
             # any still open, pointing at the PR and its merge commit.
             merge_sha=$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid // ""')
