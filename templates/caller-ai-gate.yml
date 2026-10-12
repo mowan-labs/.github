@@ -43,3 +43,8 @@ jobs:
     # owned by the SAME org, and personal-account repos call mowan-labs.
     secrets:
       KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+      # Optional. When both are set the gate merges with a GitHub App token so
+      # the merge push triggers push-driven workflows (ci -> deploy). Unset ->
+      # the gate merges with GITHUB_TOKEN (unchanged, but pushes trigger nothing).
+      GATE_APP_ID: ${{ secrets.GATE_APP_ID }}
+      GATE_APP_PRIVATE_KEY: ${{ secrets.GATE_APP_PRIVATE_KEY }}

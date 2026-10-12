@@ -65,6 +65,14 @@ on:
     secrets:
       KIRO_API_KEY:
         required: false
+      # Optional GitHub App credentials. When both are set, the decide job mints
+      # a short-lived installation token and merges with it, so the merge push
+      # triggers the caller's push-driven workflows (ci -> deploy). Unset ->
+      # the gate falls back to github.token and behaviour is unchanged.
+      GATE_APP_ID:
+        required: false
+      GATE_APP_PRIVATE_KEY:
+        required: false
 
 permissions: {}
 
@@ -222,6 +230,35 @@ jobs:
       statuses: write
       actions: write
     steps:
+      # Secrets cannot be referenced in a step `if:`, and a step's own `env:` is
+      # not reliably visible in that same step's `if:`. So a preceding step holds
+      # the secrets in its env and publishes a plain boolean output; the mint step
+      # keys off that output. Nothing secret is printed. These two steps need no
+      # checkout, so they run before it (defence in depth: the private key is
+      # never in scope while repo contents are present).
+      - name: Detect GitHub App credentials
+        id: app-secrets
+        env:
+          GATE_APP_ID: ${{ secrets.GATE_APP_ID }}
+          GATE_APP_PRIVATE_KEY: ${{ secrets.GATE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GATE_APP_ID" ] && [ -n "$GATE_APP_PRIVATE_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Mint a GitHub App installation token when both GATE_APP_* secrets are
+      # set, scoped to the current repository only (owner/repositories unset ->
+      # current repo). When they are absent the step is skipped and the gate
+      # merges with github.token (unchanged behaviour).
+      - name: Mint merge token (GitHub App)
+        id: merge-token
+        if: steps.app-secrets.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GATE_APP_ID }}
+          private-key: ${{ secrets.GATE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
       - uses: mowan-labs/.github/actions/ai-gate@mainline
         with:
@@ -241,3 +278,6 @@ jobs:
           default-branch: ${{ needs.context.outputs.default_branch }}
           head-ref: ${{ needs.context.outputs.head_ref }}
           github-token: ${{ github.token }}
+          # Empty unless the App step ran; the action falls back to github-token
+          # for the merge when this is empty.
+          merge-token: ${{ steps.merge-token.outputs.token }}

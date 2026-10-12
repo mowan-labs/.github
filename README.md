@@ -58,9 +58,11 @@ KIRO_API_KEY=ksk_... scripts/onboard-repo.sh <repo-name|owner/repo> '<test comma
 
 - **Free plan:** no branch protection on private repos, so nothing stops a
   manual merge of a red PR. The gate is the workflow's own merge job.
-- **Merges use `GITHUB_TOKEN`**, which does not trigger other workflows (for
-  example a deploy on push to `mainline`). Switch the merge job to a GitHub App
-  token when that matters.
+- **Merges use `GITHUB_TOKEN` by default**, which does not trigger other
+  workflows (for example a deploy on push to `mainline`). Set the two optional
+  secrets `GATE_APP_ID` and `GATE_APP_PRIVATE_KEY` (see "Merge with a GitHub
+  App token" below) and the gate merges with an App installation token, whose
+  push does trigger downstream workflows.
 - **Callers track `@mainline`.** Tag a release (`v1`) and pin callers to it once
   the workflow stabilises.
 
@@ -179,6 +181,32 @@ reuses recorded CI and review results instead of re-billing the model.
 `mowan/risk`, `mowan/tests`, `mowan/ai-review`, `mowan/gate` — all keyed by the
 head SHA. The gate keeps one sticky PR comment (`<!-- mowan-gate -->`) showing
 tier, decision, reasons and fix round.
+
+### Merge with a GitHub App token
+
+By default the gate merges with `GITHUB_TOKEN`. GitHub deliberately does **not**
+run workflows in response to a push (or any event) made with `GITHUB_TOKEN`, so
+a `GITHUB_TOKEN` merge to `mainline` never triggers the caller's push-driven
+`ci`, and therefore never its `workflow_run` deploy. A push made with a GitHub
+App installation token is a normal push and does trigger them.
+
+To enable it, create a GitHub App installed on the repo (with `contents: write`
+and `pull_requests: write`) and add two **optional** repo secrets:
+
+| Secret | What it is |
+|---|---|
+| `GATE_APP_ID` | The App's ID (or Client ID) |
+| `GATE_APP_PRIVATE_KEY` | A PEM private key generated for the App |
+
+When both are set, the `decide` job mints a short-lived installation token with
+[`actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
+(pinned by commit SHA), scoped to the current repository only, and uses it for
+the `gh pr merge` command alone — every other API call still uses
+`GITHUB_TOKEN`. When either secret is empty the step is skipped and the gate
+merges with `GITHUB_TOKEN` exactly as before: the secrets are a no-op until both
+exist. The gate logs which token type merged (never the token itself). The
+caller passes the secrets through its `secrets:` block (see
+`templates/caller-ai-gate.yml`).
 
 ### Kill switches
 
